@@ -25,6 +25,15 @@ extern "C" {
 #define HUD_POLY_LINE           2
 #define HUD_POLY_FILL           3
 
+/* Draw command kinds (ordered painter's list) */
+#define HUD_CMD_POLYGON         0
+#define HUD_CMD_CIRCLE          1
+
+/* HUD_FUNC_IMAGE_ADD_CIRCLE (0x021E) circleType verified in libVMostAdapter.so */
+#define HUD_CIRCLE_FULL         1
+#define HUD_CIRCLE_FILLED       2
+#define HUD_CIRCLE_ARC          3   /* "Kreisbogen" */
+
 typedef struct {
     uint8_t  valid;
     uint16_t index;
@@ -93,13 +102,21 @@ typedef struct {
 } RgdState;
 
 typedef struct {
+    uint8_t  kind;          /* HUD_CMD_POLYGON (0) or HUD_CMD_CIRCLE (1) */
     uint8_t  color;         /* HUD_COLOR_DIM (3) or HUD_COLOR_WHITE (4) */
-    uint8_t  line_width;    /* 1 or 2 */
+    uint8_t  line_width;    /* stroke width in px (used by LINE polygon & CIRCLE) */
     uint8_t  fill_mode;     /* 3 = solid fill */
     uint8_t  fill_color;    /* HUD_COLOR_DIM (3) or HUD_COLOR_WHITE (4) */
     uint8_t  poly_mode;     /* HUD_POLY_FILL (3) or HUD_POLY_LINE (2) */
     uint8_t  num_pts;
     uint16_t xy[HUD_MAX_POLY_PTS * 2];
+    /* HUD_CMD_CIRCLE (0x021E ImageAddCircle / Kreisbogen) */
+    uint8_t  circle_type;   /* HUD_CIRCLE_FULL (1), HUD_CIRCLE_FILLED (2), HUD_CIRCLE_ARC (3) */
+    uint16_t cx;
+    uint16_t cy;
+    uint16_t radius;
+    uint32_t start_01deg;   /* 0..3599 (0.1 deg), 0=9 o'clock, CW */
+    uint32_t end_01deg;     /* 0..3599 (0.1 deg), sweeps CW start -> end */
 } HudPolygonCmd;
 
 typedef struct {

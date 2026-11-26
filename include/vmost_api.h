@@ -60,6 +60,8 @@ typedef struct {
 #define HUD_FUNC_IMAGE_SET_FILL_COLOR    0x021B /* OpType 0x08: UWord instId, UByte color */
 #define HUD_FUNC_IMAGE_SET_FILL_MODE     0x021C /* OpType 0x08: UWord instId, UByte mode */
 #define HUD_FUNC_IMAGE_ADD_POLYGON       0x021D /* OpType 0x06: UWord instId, UWord zero, UByte polyMode, UByte nPts, (UWord x, UWord y)* */
+#define HUD_FUNC_IMAGE_ADD_CIRCLE        0x021E /* OpType 0x06: UWord instId, UWord zero, UByte circleType(1=full,2=fill,3=arc), UWord cx, UWord cy, UWord r, ULong start_01deg, ULong end_01deg */
+#define HUD_FUNC_IMAGE_ADD_CIRCLE_DIA    0x021F /* OpType 0x06: Circle by diameter */
 #define HUD_FUNC_IMAGE_REMOVE_ALL_ITEMS  0x0220 /* OpType 0x06: UWord instId */
 #define HUD_FUNC_POTI_SET_TYPE           0x0226 /* OpType 0x06 */
 #define HUD_FUNC_POTI_SET_RANGE          0x0229 /* OpType 0x06 */

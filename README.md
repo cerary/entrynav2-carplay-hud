@@ -10,9 +10,32 @@
 
 > 本仓库仅包含车机端纯 C 核心工程（`carplay-shim.so`、`hud_bridge`、`hud_probe`、`rgd_listen`、渲染器、单元测试与 systemd 部署模板），不含 Android 调试端 APK 与车机专有闭源库。
 
+![EntryNav2 HUD 矢量渲染效果总览](docs/hud_render_showcase.png)
+
+*以上渲染图由 `hud_render.c` 真实输出的 `0x021D` 多边形与 `0x021E` 圆弧指令直接光栅化生成，无任何静态图片素材。*
+
 ---
 
-## 一、已验证目标车型与车机平台规格
+## 一、设计原理与核心优势（基于 Apple iAP2 规范与 EntryNav2 原厂库）
+
+与“借用仪表盘/Android Auto 有限图标枚举转译”的方案不同，本项目在协议层与渲染层均**直接对齐 Apple 官方 iAP2 Route Guidance 规范及 EntryNav2 原厂库实现**，实现接近原厂导航体验的无损 HUD 投射：
+
+### 1. 基于 Apple 官方 iAP2 协议的全量无损直通
+- **标准组件声明与主动订阅**：在 `NmeIAP2Message::Encode` 拦截 `0x1D01` (`IdentificationInformation`)，严格按 iAP2 规范顺序构造 `0x001E RouteGuidanceDisplayComponent`（`0x0000..0x0008`）并补充 `0x0006` (`0x5200/0x5203`) 与 `0x0007` (`0x5201/0x5202/0x5204`)；收到 `0x1D02 IdentificationAccepted` 后调用车机原生 `ICinemoIAP_StartRouteGuidanceUpdates`（已核对 `libNmeSDK.so` / `libNmeBaseClasses.so` / `libNmeVfs.so`）激活手机端实时引导。
+- **全字段直通，不降维丢精度**：完整解析 `0x5201` (`RouteState 0..6`、`ManeuverState`、当前路名、目的地名称、剩余距离与单位)、`0x5202`（`ManeuverType 0..53`、自由 `ExitAngle -180°..+180°`、`JunctionType`、`JunctionElementAngles[]`、`DrivingSide`）以及 `0x5204`（多车道 `Position/Status/Angles/HighlightedAngle`），**无需将自由角度、环岛多出口和多车道压扁为粗粒度静态枚举**。
+
+### 2. 基于 EntryNav2 原厂库的原生光学 MOST HUD 矢量渲染
+经逆向核验原厂 `libVMostAdapter.so`、`libvmostclient.so.1.6.0` 与 `libvmostcpp.so.1.6.0`，`hud_render.c` 直接生成 `HUDTerminal` (`FBlock 0x82 / Inst 0x00`, `MHP 0xF1/0x05`) 原生矢量指令：
+- **自由角度平滑矢量化**：依据 `ExitAngle` 连续旋转主路径，结合等半径圆弧倒角与 `Open V-Chevron` 开口箭头，并将 `JunctionElementAngles[]` 绘制为暗色（`HUD_COLOR_DIM = 3`）非行进岔路底图。
+- **原生 `0x021E` 硬件圆弧与实心圆（`ImageAddCircle / Kreisbogen`）**：精确对齐原厂 `0x021E` 角度坐标系（`0 = 9 点钟顺时针`、`0.1°` 精度），用于环岛外环（`HUD_CIRCLE_FULL`）、高速变道与偏置终点的双切圆 **S 弯**（`HUD_CIRCLE_ARC`）及终点圆标（`HUD_CIRCLE_FILLED`），彻底消除多边形近似圆弧的折线锯齿。
+- **单块无缝连续轮廓（V4 引擎）**：实测确认原厂 `0x021D` (`ImageAddPolygon`) 支持单面 38~58 顶点，引擎将掉头弯杆与环岛引导轨迹（入环直杆 → G1 切线入环 → 环岛圆弧 → G1 切线出环 → 出口箭杆）合并为**单块连续填充多边形**，零拼接接缝。
+- **原厂 `DestinationMan` 风格到达终点与状态兜底**：对齐 `libVMostAdapter.so` 到达渲染规范，以 `0x021E HUD_CIRCLE_FILLED` 实心圆标配指向圆点的向上箭头呈现；同时支持 `ManeuverType = 10/12/24/25/27`（含左/右偏置 S 弯）及 `RouteState = 2 (Arrived)` 强制兜底（自动隐藏旧车道条并优先展示 `DestinationName`）。
+- **原生中文/CJK 编码（`UTF-16BE`）**：遵循 `libvmostcpp.so.1.6.0` `writeMOSTString` 规则，纯 ASCII 走 `0x01` 编码，含中文或非 ASCII 自动编码为 `0x00` + **UTF-16 Big-Endian** + `0x0000`，在原厂风挡 HUD 清晰显示高德/Apple/百度中文路名与目的地。
+- **车规级稳定性与轻量低入侵**：`CARPLAY` 进程内仅做 `trylock` 环形缓冲防触发 `WatchdogSec=75`；独立 `hud_bridge`（ARMv7 stripped 约 55 KB）负责 `FNV-1a` 差异渲染、双缓冲 `SwitchVisibility (0x020E)`、15 秒长直路保活、`ErrorAck (0x0F)` 遇原厂导航自动退让 5 秒、`2500ms` 重算路防抖及 `systemd` 3 次崩溃自动回退。
+
+---
+
+## 二、已验证目标车型与车机平台规格
 
 | 项目 | 实车验证版本 / 规格 |
 |---|---|
@@ -28,7 +51,7 @@
 
 ---
 
-## 二、整体架构与实时数据流
+## 三、整体架构与实时数据流
 
 ```text
 ┌───────────────────┐     iAP2 (0x1D01/0x1D02/0x5200..0x5204)     ┌──────────────────────────────┐
@@ -50,7 +73,7 @@
 
 ---
 
-## 三、目录结构与核心模块说明
+## 四、目录结构与核心模块说明
 
 ```text
 hud-port/
@@ -94,11 +117,12 @@ hud-port/
   - 支持 `route_state` `1/2/5/6` 及带有效转向的 `3/4`；
   - `2500ms` 重算路防抖（`REROUTE_DEBOUNCE_MS`）：短暂 `route_state=0` 不闪烁清屏，超时后才调用 `rgd_state_reset_route()`；收到 `0x5203` 立即清屏；
   - 自动过滤 `0xFFFFFFFF` 无效距离哨兵值，支持公制（`m`/`km`）与英制（`ft`/`yd`/`mi`）格式化。
-- **V4 单块连续矢量轮廓渲染（`HUD_MAX_POLY_PTS = 64`）**：
-  - 经对车机原厂 `libVMostAdapter.so` 的 `0x021D`（`ImageAddPolygon`）核查，`nPts` 为 `uint8_t`（上限 255 点），EntryNav2 实车稳定支持单块 38~58 顶点连续填充多边形。
+- **V4 单块连续矢量轮廓 + `0x021E` 原生圆弧渲染（`HUD_MAX_POLY_PTS = 64`）**：
+  - 经对车机原厂 `libVMostAdapter.so` 的 `0x021D`（`ImageAddPolygon`）与 `0x021E`（`ImageAddCircle`）核查，`0x021D` 的 `nPts` 为 `uint8_t`（上限 255 点），EntryNav2 实车稳定支持单块 38~58 顶点连续填充多边形。
   - **普通转向弯道**：等半径圆弧倒角（`R=15~26px`），同时绘制 `JunctionElementAngles[]` 灰色非行进岔路。
   - **掉头**：整条弯杆 + 26 段半圆弧合并为 **1 个整块连续多边形**（加 1 个箭头共 2 面），消除矩形接缝。
-  - **环岛**：灰色底环用 2 个等宽半圆；高亮路径（直杆 → G1 切线入环 → 环岛圆弧 → G1 切线出环 → 出口箭杆）由 `add_polyline_ribbon()` 合并为 **1 个整块无缝多边形**，带 `fillet_deg <= sweep * 0.4f` 小角度早出保护。
+  - **环岛**：灰色底环用 `0x021E` 原生圆形/半圆；高亮路径（直杆 → G1 切线入环 → 环岛圆弧 → G1 切线出环 → 出口箭杆）由 `add_polyline_ribbon()` 合并为 **1 个整块无缝多边形**，带 `fillet_deg <= sweep * 0.4f` 小角度早出保护。
+  - **高速变道（`52/53`）与到达终点（`10/12/24/25/27` / `route_state=2`）**：变道与左/右偏置终点使用 `0x021E HUD_CIRCLE_ARC` 双切圆 S 弯实现无锯齿过渡；终点采用原厂 `GI: DestinationMan` 风格（`0x021E HUD_CIRCLE_FILLED` 实心圆点 + 向上箭头）。
 - **`1.LaneGuidance`（`184×17`）车道条**：
   - 解析 `0x5204` 各车道的 `position`、`status`（0=不可用灰、1=可用白、2=推荐白）、多方向 `angles[]` 与 `highlighted_angle` 现场绘制；兼容未下发 `0x0012` 显隐标志时的索引兜底显示。
 - **中文路名编码 `hud_encode_most_string()`**：
@@ -121,7 +145,7 @@ hud-port/
 
 ---
 
-## 四、交叉编译
+## 五、交叉编译
 
 ### 依赖准备
 1. 安装 [Zig](https://ziglang.org/)（实测使用 `zig 0.17.1`）。
@@ -143,7 +167,7 @@ export RUNTIME_LIB=/path/to/entrynav2/usr/local/lib
 
 ---
 
-## 五、车机部署（先纯内存验证，确认无误再考虑持久化）
+## 六、车机部署（先纯内存验证，确认无误再考虑持久化）
 
 > **安全铁律**：**绝对不要在根分区 `/` 处于 `rw`（读写）状态时熄火断电！** 先使用纯内存方案验证。
 
@@ -181,7 +205,7 @@ systemctl restart CARPLAY.service
 
 ---
 
-## 六、地图 App 实测表现
+## 七、地图 App 实测表现
 
 | 导航 App | 转向箭头/距离/中文路名 | 多车道引导 (`0x5204`) | 说明 |
 |---|---|---|---|
@@ -191,7 +215,7 @@ systemctl restart CARPLAY.service
 
 ---
 
-## 七、原创版权声明与非商业开源许可
+## 八、原创版权声明与非商业开源许可
 
 - **版权声明**：`Copyright (c) 2026 cerary. All rights reserved.`
 - **原创性说明**：本仓库中的所有 C 语言源码（`carplay_shim.c`、`hud_bridge.c`、`hud_render.c`、`hud_probe.c`、`rgd_listen.c`、`iap2_rgd.h`、`vmost_api.h`、`hud_render.h`、`test_hud_render.c`）均为作者基于实车抓包与二进制分析**独立原创编写**，不包含任何第三方源码或静态图片素材；编译所需的 `libvmostclient.so.1` 与 `libvmost.so.1` 为车机原厂系统库（请从自己的主机提取，本仓库不提供）。

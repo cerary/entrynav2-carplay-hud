@@ -4,6 +4,7 @@ build/
 *.a
 *.log
 *.png
+!docs/*.png
 *.html
 .DS_Store
 ._*

@@ -10,9 +10,32 @@ Real-time **iPhone CarPlay Route Guidance** (maneuver icons, exit angles & junct
 
 > This repository contains only the pure-C head-unit core (`carplay-shim.so`, `hud_bridge`, `hud_probe`, `rgd_listen`, renderer, unit tests, and `systemd` unit templates). It excludes the Android companion APK and proprietary head-unit libraries.
 
+![EntryNav2 HUD Vector Render Showcase](docs/hud_render_showcase.png)
+
+*Rasterized directly from real `0x021D` polygon and `0x021E` circle/arc draw commands emitted by `hud_render.c` — zero static bitmap assets.*
+
 ---
 
-## 1. Verified Vehicle & Head-Unit Platform
+## 1. Architecture Principles & Advantages (Apple iAP2 + OEM EntryNav2 Stack)
+
+Unlike cluster/Android-Auto bridge approaches that collapse maneuvers into a small static enum set, this project aligns directly with both the **Apple iAP2 Route Guidance specification** and **EntryNav2's native MOST HUD stack**, achieving near-OEM visual fidelity on the windshield HUD:
+
+### 1. Lossless Apple iAP2 Route Guidance Passthrough
+- **Compliant Identification & Native Subscription**: `NmeIAP2Message::Encode` patches `0x1D01` (`IdentificationInformation`) with `0x001E RouteGuidanceDisplayComponent` (`0x0000..0x0008` in exact iAP2 order) plus `0x0006` (`0x5200/0x5203`) and `0x0007` (`0x5201/0x5202/0x5204`), then triggers native `ICinemoIAP_StartRouteGuidanceUpdates` upon `0x1D02 IdentificationAccepted` (verified against `libNmeSDK.so`, `libNmeBaseClasses.so`, and `libNmeVfs.so`).
+- **Full-Fidelity Telemetry**: Parses the complete iAP2 payload — `0x5201` (`RouteState 0..6`, `ManeuverState`, road/destination names, distance & units), `0x5202` (`ManeuverType 0..53`, continuous `ExitAngle -180°..+180°`, `JunctionType`, `JunctionElementAngles[]`, `DrivingSide`), and `0x5204` (`LaneGuidance` positions, statuses, multi-angles, and highlighted direction) — preserving continuous geometry instead of quantizing into fixed icon buckets.
+
+### 2. Native Optical MOST HUD Vector Rendering (Verified Against OEM Libraries)
+Verified against factory `libVMostAdapter.so`, `libvmostclient.so.1.6.0`, and `libvmostcpp.so.1.6.0`, `hud_render.c` emits native `HUDTerminal` (`FBlock 0x82 / Inst 0x00`, `MHP 0xF1/0x05`) drawing primitives with zero bitmap assets:
+- **Continuous-Angle Turns & Junction Context**: Smooth circular-fillet turns rotated by exact `ExitAngle`, paired with `Open V-Chevron` arrowheads and dimmed (`HUD_COLOR_DIM = 3`) `JunctionElementAngles[]` non-navigated branches.
+- **Hardware `0x021E` Circles & Arcs (`ImageAddCircle / Kreisbogen`)**: Uses EntryNav2's verified `0x021E` coordinate system (`0 = 9 o'clock clockwise`, `0.1°` units) for roundabout base rings (`HUD_CIRCLE_FULL`), tangent-matched **S-curves** (`HUD_CIRCLE_ARC`) on highway lane changes / offset destinations, and solid arrival markers (`HUD_CIRCLE_FILLED`), eliminating polygon quantization wobble.
+- **Seamless Single-Polygon Contours (V4 Engine)**: Factory `0x021D` (`ImageAddPolygon`) supports 38–58 vertex solid polygons reliably; U-turns and highlighted roundabout paths (entry stem → G1 tangent fillet → ring arc → G1 exit fillet → exit stem) are merged into **one seamless polygon** with zero seam lines.
+- **OEM `DestinationMan`-Style Arrival**: Mirrors `libVMostAdapter.so` (`GI: DestinationMan`), combining a native `0x021E HUD_CIRCLE_FILLED` dot with an upward arrow for `ManeuverType = 10/12/24/25/27` (including left/right S-curves) and a `RouteState = 2 (Arrived)` fallback that hides stale lane strips and prioritizes `DestinationName`.
+- **Native CJK / UTF-16BE Text Encoding**: Implements `libvmostcpp.so.1.6.0` `writeMOSTString` (`0x01` for pure ASCII, `0x00` + **UTF-16 Big-Endian** + `0x0000` for CJK/non-ASCII), displaying Chinese street and destination names natively on the OEM HUD.
+- **Production Safety & Low Footprint**: Non-blocking `trylock` ring buffer keeps `CARPLAY` well clear of `WatchdogSec=75`; standalone `hud_bridge` (~55 KB stripped ARMv7) handles `FNV-1a` frame diffing, double-buffered `SwitchVisibility (0x020E)`, 15s keepalive, 5s `ErrorAck (0x0F)` yield to factory nav, `2500ms` reroute debounce, and a 3-crash `systemd` auto-fallback.
+
+---
+
+## 2. Verified Vehicle & Head-Unit Platform
 
 | Item | Verified Specification |
 |---|---|
@@ -28,7 +51,7 @@ Real-time **iPhone CarPlay Route Guidance** (maneuver icons, exit angles & junct
 
 ---
 
-## 2. Architecture & Data Flow
+## 3. Architecture & Data Flow
 
 ```text
 ┌───────────────────┐     iAP2 (0x1D01/0x1D02/0x5200..0x5204)     ┌──────────────────────────────┐
@@ -50,7 +73,7 @@ Real-time **iPhone CarPlay Route Guidance** (maneuver icons, exit angles & junct
 
 ---
 
-## 3. Repository Layout & Module Details
+## 4. Repository Layout & Module Details
 
 ```text
 hud-port/
@@ -95,11 +118,12 @@ Pure-C state machine and procedural vector renderer — **zero bitmap/PNG assets
   - Active on `route_state` `1/2/5/6` and `3/4` when maneuvers exist;
   - `2500ms` reroute debounce (`REROUTE_DEBOUNCE_MS`) prevents flickering or premature maneuver cache wipes during brief `route_state=0` transitions; `0x5203` clears immediately;
   - Filters out `0xFFFFFFFF` sentinel distance values and formats both metric (`m`/`km`) and imperial (`ft`/`yd`/`mi`) units.
-- **V4 Seamless Single-Polygon Vector Rendering (`HUD_MAX_POLY_PTS = 64`)**:
-  - Verified against factory `libVMostAdapter.so` (`0x021D ImageAddPolygon` accepts a `uint8_t` point count up to 255); EntryNav2 renders 38–58 vertex solid polygons cleanly with zero `[HUD_ERR]`.
+- **V4 Seamless Single-Polygon + `0x021E` Hardware Arc Rendering (`HUD_MAX_POLY_PTS = 64`)**:
+  - Verified against factory `libVMostAdapter.so` (`0x021D ImageAddPolygon` accepts a `uint8_t` point count up to 255, and `0x021E ImageAddCircle` draws hardware circles/arcs); EntryNav2 renders 38–58 vertex solid polygons cleanly with zero `[HUD_ERR]`.
   - **Turns**: constant-radius circular fillets (`R=15..26px`) plus dimmed `JunctionElementAngles[]` side roads.
   - **U-turns**: entire stem + 26-segment U-bend merged into **one continuous polygon** (2 polygons total including arrowhead), eliminating seam artifacts.
-  - **Roundabouts**: dual semicircular grey base ring; highlighted route (`entry stem → G1 tangent fillet → ring arc → G1 exit fillet → exit stem`) merged via `add_polyline_ribbon()` into **one seamless polygon**, with `fillet_deg <= sweep * 0.4f` clamping for early exits.
+  - **Roundabouts**: grey base ring rendered via native `0x021E`; highlighted route (`entry stem → G1 tangent fillet → ring arc → G1 exit fillet → exit stem`) merged via `add_polyline_ribbon()` into **one seamless polygon**, with `fillet_deg <= sweep * 0.4f` clamping for early exits.
+  - **Highway Lane Changes (`52/53`) & Destination Arrival (`10/12/24/25/27` / `route_state=2`)**: dual-arc `0x021E HUD_CIRCLE_ARC` S-curves for smooth lateral transitions, paired with OEM `GI: DestinationMan` styling (`0x021E HUD_CIRCLE_FILLED` dot + upward arrow).
 - **`1.LaneGuidance` (`184×17`)**:
   - Parses `0x5204` lanes (`position`, `status` 0/1/2, multiple `angles[]`, `highlighted_angle`) with fallback rendering if `0x0012 lane_guidance_showing` is omitted.
 - **MOST String Encoding (`hud_encode_most_string()`)**:
@@ -121,7 +145,7 @@ Pure-C state machine and procedural vector renderer — **zero bitmap/PNG assets
 
 ---
 
-## 4. Cross-Compilation
+## 5. Cross-Compilation
 
 ### Prerequisites
 1. Install [Zig](https://ziglang.org/) (tested with `zig 0.17.1`).
@@ -143,7 +167,7 @@ export RUNTIME_LIB=/path/to/entrynav2/usr/local/lib
 
 ---
 
-## 5. Head-Unit Deployment
+## 6. Head-Unit Deployment
 
 > **Safety Rule**: **Never power off the ignition while `/` is mounted read-write (`rw`).** Always test with the RAM-only setup first.
 
@@ -181,7 +205,7 @@ systemctl restart CARPLAY.service
 
 ---
 
-## 6. Navigation App Compatibility
+## 7. Navigation App Compatibility
 
 | App | Maneuver Icon / Distance / Road Name | Lane Guidance (`0x5204`) | Notes |
 |---|---|---|---|
@@ -191,7 +215,7 @@ systemctl restart CARPLAY.service
 
 ---
 
-## 7. Copyright & Noncommercial License
+## 8. Copyright & Noncommercial License
 
 - **Copyright**: `Copyright (c) 2026 cerary. All rights reserved.`
 - **Originality**: All C source files, headers, vector rendering algorithms, and tests in this repository (`carplay_shim.c`, `hud_bridge.c`, `hud_render.c`, `hud_probe.c`, `rgd_listen.c`, `iap2_rgd.h`, `vmost_api.h`, `hud_render.h`, `test_hud_render.c`) are **original work written from scratch** by the author based on live vehicle captures and binary analysis, with zero third-party code or static image assets. The `libvmostclient.so.1` and `libvmost.so.1` shared libraries required for linking belong to your own head unit and are not distributed here.

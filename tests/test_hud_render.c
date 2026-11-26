@@ -46,15 +46,24 @@ static size_t add_str(uint8_t *p, uint16_t id, const char *s) {
 
 static void assert_polys_in_bounds(const HudPolygonCmd *polys, uint8_t n, uint16_t w, uint16_t h) {
     for (uint8_t i = 0; i < n; i++) {
-        assert(polys[i].num_pts >= 3 && polys[i].num_pts <= HUD_MAX_POLY_PTS);
-        assert(polys[i].poly_mode == HUD_POLY_FILL);
         assert(polys[i].color == HUD_COLOR_WHITE || polys[i].color == HUD_COLOR_DIM);
-        for (uint8_t k = 0; k < polys[i].num_pts; k++) {
-            assert(polys[i].xy[k * 2] >= 1 && polys[i].xy[k * 2] < w);
-            assert(polys[i].xy[k * 2 + 1] >= 1 && polys[i].xy[k * 2 + 1] < h);
-            uint8_t nxt = (uint8_t)((k + 1) % polys[i].num_pts);
-            assert(!(polys[i].xy[k * 2] == polys[i].xy[nxt * 2] &&
-                     polys[i].xy[k * 2 + 1] == polys[i].xy[nxt * 2 + 1]));
+        if (polys[i].kind == HUD_CMD_CIRCLE) {
+            assert(polys[i].circle_type >= HUD_CIRCLE_FULL && polys[i].circle_type <= HUD_CIRCLE_ARC);
+            assert(polys[i].cx >= 1 && polys[i].cx < w);
+            assert(polys[i].cy >= 1 && polys[i].cy < h);
+            assert(polys[i].radius >= 1);
+            assert(polys[i].line_width >= 1);
+            assert(polys[i].start_01deg < 3600u && polys[i].end_01deg < 3600u);
+        } else {
+            assert(polys[i].num_pts >= 3 && polys[i].num_pts <= HUD_MAX_POLY_PTS);
+            assert(polys[i].poly_mode == HUD_POLY_FILL);
+            for (uint8_t k = 0; k < polys[i].num_pts; k++) {
+                assert(polys[i].xy[k * 2] >= 1 && polys[i].xy[k * 2] < w);
+                assert(polys[i].xy[k * 2 + 1] >= 1 && polys[i].xy[k * 2 + 1] < h);
+                uint8_t nxt = (uint8_t)((k + 1) % polys[i].num_pts);
+                assert(!(polys[i].xy[k * 2] == polys[i].xy[nxt * 2] &&
+                         polys[i].xy[k * 2 + 1] == polys[i].xy[nxt * 2 + 1]));
+            }
         }
     }
 }
@@ -196,8 +205,15 @@ int main(void) {
     n = build_msg(pkt, IAP2_MSG_ROUTE_GUIDANCE_UPDATE, tlvs, t);
     rgd_state_ingest(&st, pkt, n, 2125);
     hud_render_build_frame(&st, 2125, 120, 72, 184, 17, &frame);
-    assert(frame.icon_poly_count == 2);
+    assert(frame.icon_poly_count == 5);
     assert_polys_in_bounds(frame.icon_polys, frame.icon_poly_count, 120, 72);
+    int uturn_has_arc = 0;
+    for (uint8_t i = 0; i < frame.icon_poly_count; i++) {
+        if (frame.icon_polys[i].kind == HUD_CMD_CIRCLE && frame.icon_polys[i].circle_type == HUD_CIRCLE_ARC) {
+            uturn_has_arc = 1;
+        }
+    }
+    assert(uturn_has_arc);
 
     t = 0;
     t += add_u16(tlvs + t, IAP2_RGM_INDEX, 4);
@@ -209,7 +225,29 @@ int main(void) {
     n = build_msg(pkt, IAP2_MSG_ROUTE_GUIDANCE_UPDATE, tlvs, t);
     rgd_state_ingest(&st, pkt, n, 2135);
     hud_render_build_frame(&st, 2135, 120, 72, 184, 17, &frame);
-    assert(frame.icon_poly_count >= 4);
+    assert(frame.icon_poly_count >= 3);
+    assert_polys_in_bounds(frame.icon_polys, frame.icon_poly_count, 120, 72);
+
+    /* Multi-road 6-way intersection */
+    t = 0;
+    t += add_u16(tlvs + t, IAP2_RGM_INDEX, 6);
+    t += add_u8(tlvs + t, IAP2_RGM_MANEUVER_TYPE, 14); /* SLIGHT_RIGHT */
+    t += add_u16(tlvs + t, IAP2_RGM_JUNCTION_ELEMENT_EXIT_ANGLE, 45);
+    uint8_t j6[12];
+    iap2_put_be16(j6 + 0, (uint16_t)(int16_t)-180);
+    iap2_put_be16(j6 + 2, (uint16_t)(int16_t)-110);
+    iap2_put_be16(j6 + 4, (uint16_t)(int16_t)-45);
+    iap2_put_be16(j6 + 6, 0);
+    iap2_put_be16(j6 + 8, 45);
+    iap2_put_be16(j6 + 10, 110);
+    t += add_tlv(tlvs + t, IAP2_RGM_JUNCTION_ELEMENT_ANGLE, j6, sizeof(j6));
+    n = build_msg(pkt, IAP2_MSG_ROUTE_GUIDANCE_MANEUVER, tlvs, t);
+    rgd_state_ingest(&st, pkt, n, 2136);
+    t = 0; t += add_u16(tlvs + t, IAP2_RGU_MANEUVER_CURRENT_LIST, 6);
+    n = build_msg(pkt, IAP2_MSG_ROUTE_GUIDANCE_UPDATE, tlvs, t);
+    rgd_state_ingest(&st, pkt, n, 2137);
+    hud_render_build_frame(&st, 2137, 120, 72, 184, 17, &frame);
+    assert(frame.icon_poly_count >= 7);
     assert_polys_in_bounds(frame.icon_polys, frame.icon_poly_count, 120, 72);
 
     t = 0;
@@ -229,6 +267,49 @@ int main(void) {
     hud_render_build_test_frame(120, 72, 184, 17, "长安街", &frame);
     assert(frame.visible == 1 && frame.lane_visible == 1);
     assert_polys_in_bounds(frame.icon_polys, frame.icon_poly_count, 120, 72);
+    assert_polys_in_bounds(frame.lane_polys, frame.lane_poly_count, 184, 17);
+    int lane_has_arc = 0;
+    for (uint8_t i = 0; i < frame.lane_poly_count; i++) {
+        if (frame.lane_polys[i].kind == HUD_CMD_CIRCLE && frame.lane_polys[i].circle_type == HUD_CIRCLE_ARC) {
+            lane_has_arc = 1;
+        }
+    }
+    assert(lane_has_arc);
+
+    /* Overflow (>7) lanes should show 0x021E filled ellipsis dots */
+    RgdState st_ov;
+    rgd_state_init(&st_ov);
+    st_ov.route_state = 1;
+    st_ov.ever_active = 1;
+    st_ov.last_active_ms = 1000;
+    st_ov.has_man_current = 1;
+    st_ov.man_current_idx = 0;
+    st_ov.man_count = 1;
+    st_ov.maneuvers[0].valid = 1;
+    st_ov.maneuvers[0].index = 0;
+    st_ov.maneuvers[0].type = 3;
+    st_ov.lane_guidance_showing = 1;
+    st_ov.has_lane_idx = 1;
+    st_ov.lane_guidance_idx = 0;
+    st_ov.lane_events[0].valid = 1;
+    st_ov.lane_events[0].index = 0;
+    st_ov.lane_events[0].lane_count = 9;
+    for (int li = 0; li < 9; li++) {
+        st_ov.lane_events[0].lanes[li].position = (uint16_t)li;
+        st_ov.lane_events[0].lanes[li].status = (li == 4) ? 2 : 0;
+        st_ov.lane_events[0].lanes[li].angle_count = 1;
+        st_ov.lane_events[0].lanes[li].angles[0] = (li == 0) ? -90 : (li == 8) ? 90 : 0;
+    }
+    hud_render_build_frame(&st_ov, 1000, 120, 72, 184, 17, &frame);
+    assert(frame.lane_visible == 1);
+    assert_polys_in_bounds(frame.lane_polys, frame.lane_poly_count, 184, 17);
+    int lane_dot_cnt = 0;
+    for (uint8_t i = 0; i < frame.lane_poly_count; i++) {
+        if (frame.lane_polys[i].kind == HUD_CMD_CIRCLE && frame.lane_polys[i].circle_type == HUD_CIRCLE_FILLED) {
+            lane_dot_cnt++;
+        }
+    }
+    assert(lane_dot_cnt == 6); /* 3 dots left + 3 dots right */
     assert_polys_in_bounds(frame.lane_polys, frame.lane_poly_count, 184, 17);
 
     /* 7. Verify MOST string encoding (ASCII -> 0x01, Chinese -> 0x00 + UTF-16BE + 0x0000) */
@@ -274,6 +355,65 @@ int main(void) {
     assert(frame.visible == 1);
     assert(frame.dist_text[0] == '\0');
     assert(frame.lane_visible == 1);
+
+    /* 9. Verify OEM DestinationMan style (HUD_CIRCLE_FILLED + upward arrow) for type 12/24/25
+     *    and route_state=2 (Arrived) fallback even when man_current is empty or stale */
+    RgdState st_arr;
+    rgd_state_init(&st_arr);
+    st_arr.route_state = 1;
+    st_arr.man_count = 1;
+    st_arr.has_man_current = 1;
+    st_arr.man_current_idx = 5;
+    snprintf(st_arr.dest_name, sizeof(st_arr.dest_name), "Hongqiao Station");
+    st_arr.maneuvers[0].valid = 1;
+    st_arr.maneuvers[0].index = 5;
+    st_arr.maneuvers[0].type = 12; /* ARRIVE_AT_DESTINATION */
+    hud_render_build_frame(&st_arr, 4000, 120, 72, 184, 17, &frame);
+    assert(frame.visible == 1);
+    assert_polys_in_bounds(frame.icon_polys, frame.icon_poly_count, 120, 72);
+    assert(strcmp(frame.street_text, "Hongqiao Station") == 0);
+    assert(frame.icon_poly_count >= 3);
+    assert(frame.icon_polys[0].kind == HUD_CMD_CIRCLE);
+    assert(frame.icon_polys[0].circle_type == HUD_CIRCLE_FILLED);
+    assert(frame.icon_polys[0].cx == 60);
+
+    st_arr.maneuvers[0].type = 24; /* ARRIVE_DESTINATION_LEFT */
+    hud_render_build_frame(&st_arr, 4010, 120, 72, 184, 17, &frame);
+    assert_polys_in_bounds(frame.icon_polys, frame.icon_poly_count, 120, 72);
+    assert(frame.icon_polys[0].kind == HUD_CMD_CIRCLE && frame.icon_polys[0].circle_type == HUD_CIRCLE_FILLED);
+    assert(frame.icon_polys[0].cx == 46);
+
+    st_arr.maneuvers[0].type = 25; /* ARRIVE_DESTINATION_RIGHT */
+    hud_render_build_frame(&st_arr, 4020, 120, 72, 184, 17, &frame);
+    assert_polys_in_bounds(frame.icon_polys, frame.icon_poly_count, 120, 72);
+    assert(frame.icon_polys[0].kind == HUD_CMD_CIRCLE && frame.icon_polys[0].circle_type == HUD_CIRCLE_FILLED);
+    assert(frame.icon_polys[0].cx == 74);
+
+    /* Arrived route_state=2 with empty MANEUVER_CURRENT_LIST and stale turn maneuver[0] + lane */
+    t = 0;
+    t += add_u16(tlvs + t, IAP2_RGM_INDEX, 0);
+    t += add_u8(tlvs + t, IAP2_RGM_MANEUVER_TYPE, 2); /* stale right turn */
+    n = build_msg(pkt, IAP2_MSG_ROUTE_GUIDANCE_MANEUVER, tlvs, t);
+    assert(rgd_state_ingest(&st2, pkt, n, 4100) == 1);
+    t = 0;
+    t += add_u8(tlvs + t, IAP2_RGU_STATE, 2); /* Arrived */
+    t += add_tlv(tlvs + t, IAP2_RGU_DESTINATION_NAME, (const uint8_t *)"Home", 4);
+    t += add_u16(tlvs + t, IAP2_RGU_MANEUVER_CURRENT_LIST, 0); /* will clear if 0B; test explicit 0B next */
+    n = build_msg(pkt, IAP2_MSG_ROUTE_GUIDANCE_UPDATE, tlvs, t);
+    assert(rgd_state_ingest(&st2, pkt, n, 4110) == 1);
+    t = 0;
+    t += add_u8(tlvs + t, IAP2_RGU_STATE, 2);
+    t += add_tlv(tlvs + t, IAP2_RGU_MANEUVER_CURRENT_LIST, NULL, 0);
+    n = build_msg(pkt, IAP2_MSG_ROUTE_GUIDANCE_UPDATE, tlvs, t);
+    assert(rgd_state_ingest(&st2, pkt, n, 4120) == 1);
+    assert(rgd_state_should_show(&st2, 4120) == 1);
+    hud_render_build_frame(&st2, 4120, 120, 72, 184, 17, &frame);
+    assert(frame.visible == 1);
+    assert(frame.lane_visible == 0);
+    assert(strcmp(frame.street_text, "Home") == 0);
+    assert_polys_in_bounds(frame.icon_polys, frame.icon_poly_count, 120, 72);
+    assert(frame.icon_polys[0].kind == HUD_CMD_CIRCLE && frame.icon_polys[0].circle_type == HUD_CIRCLE_FILLED);
+    assert(frame.icon_polys[0].cx == 60);
 
     printf("ALL test_hud_render ASSERTIONS PASSED!\n");
     return 0;

@@ -441,6 +441,8 @@ static void add_poly(HudPolygonCmd *arr, uint8_t *cnt,
     if (qn < 2) return;
 
     HudPolygonCmd *c = &arr[*cnt];
+    memset(c, 0, sizeof(*c));
+    c->kind = HUD_CMD_POLYGON;
     c->color = color;
     c->line_width = lw;
     c->fill_mode = (poly_mode == HUD_POLY_FILL) ? 3 : 0;
@@ -454,47 +456,97 @@ static void add_poly(HudPolygonCmd *arr, uint8_t *cnt,
     (*cnt)++;
 }
 
+/* Convert screen angle (0=top, +90=right, 180=bottom, -90=left)
+ * to MOST 0x021E angle (0.1 deg units, 0=9 o'clock/left, CW: 900=top, 1800=right, 2700=bottom). */
+static uint32_t screen_deg_to_hud_01deg(float screen_deg) {
+    float d = fmodf(screen_deg + 90.0f, 360.0f);
+    if (d < 0.0f) d += 360.0f;
+    int v = (int)lroundf(d * 10.0f) % 3600;
+    if (v < 0) v += 3600;
+    return (uint32_t)v;
+}
+
+/* Emit native MOST 0x021E (ImageAddCircle / Kreisbogen) command */
+static void add_circle(HudPolygonCmd *arr, uint8_t *cnt,
+                       uint16_t w, uint16_t h,
+                       uint8_t color, uint8_t lw, uint8_t circle_type,
+                       float cx, float cy, float radius,
+                       uint32_t start_01deg, uint32_t end_01deg) {
+    if (*cnt >= HUD_MAX_POLYS) return;
+    uint16_t max_x = (w > 2) ? (uint16_t)(w - 2) : 1;
+    uint16_t max_y = (h > 2) ? (uint16_t)(h - 2) : 1;
+    uint16_t max_r = (w > h) ? w : h;
+    if (lw < 1) lw = 1;
+
+    HudPolygonCmd *c = &arr[*cnt];
+    memset(c, 0, sizeof(*c));
+    c->kind = HUD_CMD_CIRCLE;
+    c->color = color;
+    c->line_width = lw;
+    c->fill_mode = 0;
+    c->fill_color = color;
+    c->circle_type = circle_type;
+    c->cx = clamp_u16(cx, 1, max_x);
+    c->cy = clamp_u16(cy, 1, max_y);
+    c->radius = clamp_u16(radius, 1, max_r);
+    c->start_01deg = start_01deg % 3600u;
+    c->end_01deg = end_01deg % 3600u;
+    (*cnt)++;
+}
+
+/* Draw a road segment from (x0,y0) to (x1,y1) with optional semicircle round caps in 1 polygon */
+static void add_round_seg(HudPolygonCmd *arr, uint8_t *cnt,
+                          uint16_t w, uint16_t h,
+                          uint8_t color, float x0, float y0, float x1, float y1,
+                          float thick, int cap_start, int cap_end) {
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    float len = hypotf(dx, dy);
+    if (len < 0.35f) return;
+    float ux = dx / len;
+    float uy = dy / len;
+    float r = thick * 0.5f;
+    float nx = -uy;
+    float ny =  ux;
+    float pts[HUD_MAX_POLY_PTS * 2];
+    int n = 0;
+
+    if (cap_end) {
+        /* Semicircle dome around (x1, y1) from +n through +u to -n */
+        for (int i = 0; i <= 4; i++) {
+            float a = (float)i * ((float)M_PI / 4.0f);
+            float cn = cosf(a), cu = sinf(a);
+            pts[n * 2]     = x1 + (nx * cn + ux * cu) * r;
+            pts[n * 2 + 1] = y1 + (ny * cn + uy * cu) * r;
+            n++;
+        }
+    } else {
+        pts[n * 2] = x1 + nx * r; pts[n * 2 + 1] = y1 + ny * r; n++;
+        pts[n * 2] = x1 - nx * r; pts[n * 2 + 1] = y1 - ny * r; n++;
+    }
+
+    if (cap_start) {
+        /* Semicircle dome around (x0, y0) from -n through -u to +n */
+        for (int i = 0; i <= 4; i++) {
+            float a = (float)i * ((float)M_PI / 4.0f);
+            float cn = -cosf(a), cu = -sinf(a);
+            pts[n * 2]     = x0 + (nx * cn + ux * cu) * r;
+            pts[n * 2 + 1] = y0 + (ny * cn + uy * cu) * r;
+            n++;
+        }
+    } else {
+        pts[n * 2] = x0 - nx * r; pts[n * 2 + 1] = y0 - ny * r; n++;
+        pts[n * 2] = x0 + nx * r; pts[n * 2 + 1] = y0 + ny * r; n++;
+    }
+
+    add_poly(arr, cnt, w, h, color, 1, HUD_POLY_FILL, pts, (uint8_t)n);
+}
+
 /* Draw a thick segment (convex rectangle) from (x0,y0) to (x1,y1) of width `thick` */
 static void add_thick_seg(HudPolygonCmd *arr, uint8_t *cnt,
                           uint16_t w, uint16_t h,
                           uint8_t color, float x0, float y0, float x1, float y1, float thick) {
-    float dx = x1 - x0;
-    float dy = y1 - y0;
-    float len = hypotf(dx, dy);
-    if (len < 0.5f) return;
-    float nx = (-dy / len) * (thick * 0.5f);
-    float ny = ( dx / len) * (thick * 0.5f);
-    float pts[8] = {
-        x0 + nx, y0 + ny,
-        x1 + nx, y1 + ny,
-        x1 - nx, y1 - ny,
-        x0 - nx, y0 - ny
-    };
-    add_poly(arr, cnt, w, h, color, 2, HUD_POLY_FILL, pts, 4);
-}
-
-/* Draw a road segment from (x0,y0) to (x1,y1) with a rounded dome tip at (x1,y1) in 1 convex polygon */
-static void add_cap_seg(HudPolygonCmd *arr, uint8_t *cnt,
-                        uint16_t w, uint16_t h,
-                        uint8_t color, float x0, float y0, float x1, float y1, float thick) {
-    float dx = x1 - x0;
-    float dy = y1 - y0;
-    float len = hypotf(dx, dy);
-    if (len < 0.5f) return;
-    float ux = dx / len;
-    float uy = dy / len;
-    float r = thick * 0.5f;
-    float nx = -uy * r;
-    float ny =  ux * r;
-    float pts[12] = {
-        x0 + nx, y0 + ny,
-        x1 + nx, y1 + ny,
-        x1 + nx * 0.65f + ux * (r * 0.72f), y1 + ny * 0.65f + uy * (r * 0.72f),
-        x1 - nx * 0.65f + ux * (r * 0.72f), y1 - ny * 0.65f + uy * (r * 0.72f),
-        x1 - nx, y1 - ny,
-        x0 - nx, y0 - ny
-    };
-    add_poly(arr, cnt, w, h, color, 2, HUD_POLY_FILL, pts, 6);
+    add_round_seg(arr, cnt, w, h, color, x0, y0, x1, y1, thick, 0, 0);
 }
 
 /* Extrude a smooth quadratic Bezier centerline P0->P1->P2 into 1 continuous seamless polygon */
@@ -535,103 +587,85 @@ static void add_bezier_ribbon(HudPolygonCmd *arr, uint8_t *cnt,
     add_poly(arr, cnt, w, h, color, 1, HUD_POLY_FILL, pts, (uint8_t)idx);
 }
 
-/* Extrude a circular arc around (cx, cy) radius r from deg0 to deg1 (0=top, +90=right)
- * into 1 single continuous polygon (no internal seams/rectangles!). */
-static void add_arc_ribbon(HudPolygonCmd *arr, uint8_t *cnt,
-                           uint16_t w, uint16_t h,
-                           uint8_t color, float cx, float cy, float r,
-                           float deg0, float deg1, float thick, int steps) {
-    if (steps < 2) steps = 2;
-    if (steps > 24) steps = 24;
-    if (2 * (steps + 1) > HUD_MAX_POLY_PTS) steps = (HUD_MAX_POLY_PTS / 2) - 1;
-    float hw = thick * 0.5f;
-    float r_out = r + hw;
-    float r_in  = (r > hw + 1.0f) ? (r - hw) : 1.0f;
-    float pts[HUD_MAX_POLY_PTS * 2];
-    float ix[25], iy[25];
-
-    for (int i = 0; i <= steps; i++) {
-        float deg = deg0 + (deg1 - deg0) * ((float)i / (float)steps);
-        float rad = deg * ((float)M_PI / 180.0f);
-        float ux = sinf(rad);
-        float uy = -cosf(rad);
-        pts[i * 2]     = cx + ux * r_out;
-        pts[i * 2 + 1] = cy + uy * r_out;
-        ix[i] = cx + ux * r_in;
-        iy[i] = cy + uy * r_in;
+/* Apple CarPlay style open V-chevron arrowhead with rounded apex & rounded wing tips */
+static void add_open_chevron(HudPolygonCmd *arr, uint8_t *cnt,
+                             uint16_t w, uint16_t h,
+                             uint8_t color, float tip_x, float tip_y, float deg,
+                             float arm_len, float wing_deg, float thick) {
+    for (int sign = -1; sign <= 1; sign += 2) {
+        float a = (deg + 180.0f + (float)sign * wing_deg) * ((float)M_PI / 180.0f);
+        float wx = tip_x + sinf(a) * arm_len;
+        float wy = tip_y - cosf(a) * arm_len;
+        add_round_seg(arr, cnt, w, h, color, wx, wy, tip_x, tip_y, thick, 1, 1);
     }
-    int idx = steps + 1;
-    for (int i = steps; i >= 0; i--) {
-        pts[idx * 2]     = ix[i];
-        pts[idx * 2 + 1] = iy[i];
-        idx++;
-    }
-    add_poly(arr, cnt, w, h, color, 1, HUD_POLY_FILL, pts, (uint8_t)idx);
 }
 
-/* Extrude an arbitrary centerline polyline (px[0..n-1], py[0..n-1]) into 1 single continuous ribbon polygon */
-static void add_polyline_ribbon(HudPolygonCmd *arr, uint8_t *cnt,
-                                uint16_t w, uint16_t h,
-                                uint8_t color, const float *px, const float *py,
-                                int n, float thick) {
-    if (n < 2) return;
-    if (2 * n > HUD_MAX_POLY_PTS) n = HUD_MAX_POLY_PTS / 2;
-    float hw = thick * 0.5f;
-    float pts[HUD_MAX_POLY_PTS * 2];
-    float rx[HUD_MAX_POLY_PTS], ry[HUD_MAX_POLY_PTS];
+/* Draw a smooth S-curve between two vertical tangents (x0, y0) -> (x1, y1) using
+ * two tangent MOST 0x021E circular arcs (zero polygon quantization wobble). */
+static void add_s_curve_arcs(HudPolygonCmd *arr, uint8_t *cnt,
+                             uint16_t w, uint16_t h,
+                             uint8_t color, uint8_t lw,
+                             float x0, float y0, float x1, float y1,
+                             float s) {
+    float dx = x1 - x0;
+    float dy = y0 - y1; /* positive upward */
+    float half_dx = fabsf(dx) * 0.5f;
+    if (half_dx < 1.0f || dy < 2.0f) {
+        add_round_seg(arr, cnt, w, h, color, x0, y0, x1, y1, (float)lw, 1, 1);
+        return;
+    }
+    float dir = (dx >= 0.0f) ? 1.0f : -1.0f;
+    float half_dy = dy * 0.5f;
+    /* Circle tangent to vertical line at (x0, y0) passing through midpoint (x0+dx/2, y0-dy/2):
+     * (R - half_dx)^2 + half_dy^2 = R^2  =>  R = (half_dx^2 + half_dy^2) / (2 * half_dx) */
+    float R = (half_dx * half_dx + half_dy * half_dy) / (2.0f * half_dx);
+    float theta = asinf(fminf(1.0f, half_dy / R)) * (180.0f / (float)M_PI);
 
-    for (int i = 0; i < n; i++) {
-        float tx, ty;
-        if (i == 0) {
-            tx = px[1] - px[0];
-            ty = py[1] - py[0];
-        } else if (i == n - 1) {
-            tx = px[n - 1] - px[n - 2];
-            ty = py[n - 1] - py[n - 2];
-        } else {
-            float dx1 = px[i] - px[i - 1], dy1 = py[i] - py[i - 1];
-            float dx2 = px[i + 1] - px[i], dy2 = py[i + 1] - py[i];
-            float l1 = hypotf(dx1, dy1), l2 = hypotf(dx2, dy2);
-            if (l1 > 0.01f) { dx1 /= l1; dy1 /= l1; }
-            if (l2 > 0.01f) { dx2 /= l2; dy2 /= l2; }
-            tx = dx1 + dx2;
-            ty = dy1 + dy2;
-        }
-        float tlen = hypotf(tx, ty);
-        if (tlen < 0.01f) { tx = 0.0f; ty = -1.0f; tlen = 1.0f; }
-        float nx = (-ty / tlen) * hw;
-        float ny = ( tx / tlen) * hw;
-        pts[i * 2]     = px[i] + nx;
-        pts[i * 2 + 1] = py[i] + ny;
-        rx[i] = px[i] - nx;
-        ry[i] = py[i] - ny;
+    /* Ensure center X stays inside canvas bounds */
+    float cx1 = x0 + dir * R * s;
+    float cx2 = x1 - dir * R * s;
+    float r_px = R * s;
+    if (cx1 < 2.0f || cx1 > (float)w - 2.0f || cx2 < 2.0f || cx2 > (float)w - 2.0f) {
+        add_bezier_ribbon(arr, cnt, w, h, color,
+                          x0, y0,
+                          x0, (y0 + y1) * 0.5f,
+                          x1, y1,
+                          (float)lw, 10);
+        return;
     }
-    int idx = n;
-    for (int i = n - 1; i >= 0; i--) {
-        pts[idx * 2]     = rx[i];
-        pts[idx * 2 + 1] = ry[i];
-        idx++;
+
+    if (dir > 0.0f) {
+        /* Bottom arc around (x0+R, y0): -90 deg -> -90 + theta deg (CW) */
+        add_circle(arr, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
+                   cx1, y0, r_px,
+                   screen_deg_to_hud_01deg(-90.0f),
+                   screen_deg_to_hud_01deg(-90.0f + theta));
+        /* Top arc around (x1-R, y1): 90 deg -> 90 + theta deg (CW) */
+        add_circle(arr, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
+                   cx2, y1, r_px,
+                   screen_deg_to_hud_01deg(90.0f),
+                   screen_deg_to_hud_01deg(90.0f + theta));
+    } else {
+        /* Bottom arc around (x0-R, y0): 90 - theta deg -> 90 deg (CW) */
+        add_circle(arr, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
+                   cx1, y0, r_px,
+                   screen_deg_to_hud_01deg(90.0f - theta),
+                   screen_deg_to_hud_01deg(90.0f));
+        /* Top arc around (x1+R, y1): -90 - theta deg -> -90 deg (CW) */
+        add_circle(arr, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
+                   cx2, y1, r_px,
+                   screen_deg_to_hud_01deg(-90.0f - theta),
+                   screen_deg_to_hud_01deg(-90.0f));
     }
-    add_poly(arr, cnt, w, h, color, 1, HUD_POLY_FILL, pts, (uint8_t)idx);
-}
-/* Draw an oriented arrowhead triangle with tip at (tx,ty), pointing along angle `deg` (0=up, +90=right, -90=left) */
-static void add_arrowhead(HudPolygonCmd *arr, uint8_t *cnt,
-                          uint16_t w, uint16_t h,
-                          uint8_t color, float tx, float ty, float deg,
-                          float head_len, float head_half_w) {
-    float rad = deg * ((float)M_PI / 180.0f);
-    float ux = sinf(rad);
-    float uy = -cosf(rad);
-    float px = -uy;
-    float py = ux;
-    float bx = tx - ux * head_len;
-    float by = ty - uy * head_len;
-    float pts[6] = {
-        tx, ty,
-        bx + px * head_half_w, by + py * head_half_w,
-        bx - px * head_half_w, by - py * head_half_w
-    };
-    add_poly(arr, cnt, w, h, color, 2, HUD_POLY_FILL, pts, 3);
+    /* Smooth rounded inflection bridge so integer-radius flat-capped arcs meet without a notch */
+    float mx = (x0 + x1) * 0.5f;
+    float my = (y0 + y1) * 0.5f;
+    float tr = (dir * theta) * ((float)M_PI / 180.0f);
+    float tux = sinf(tr), tuy = -cosf(tr);
+    add_round_seg(arr, cnt, w, h, color,
+                  mx - tux * 1.5f * s, my - tuy * 1.5f * s,
+                  mx + tux * 1.5f * s, my + tuy * 1.5f * s,
+                  (float)lw, 1, 1);
 }
 
 /* ==================== Distance & Street Formatting ==================== */
@@ -731,7 +765,8 @@ static int is_roundabout_maneuver(const RgdManeuver *man) {
     return man->junction_type == 1 && man->type != 0 && man->type != 5;
 }
 
-static void render_guiding_icon(const RgdManeuver *man, uint16_t w, uint16_t h,
+static void render_guiding_icon(const RgdManeuver *man, int is_arrived,
+                                uint16_t w, uint16_t h,
                                 HudPolygonCmd *polys, uint8_t *cnt) {
     *cnt = 0;
     float sx = (float)w / 120.0f;
@@ -743,185 +778,156 @@ static void render_guiding_icon(const RgdManeuver *man, uint16_t w, uint16_t h,
     #define X(v) (ox + (v) * s)
     #define Y(v) (oy + (v) * s)
 
-    if (!man || man->type == 0 || man->type == 3 || man->type == 5 || man->type == 15 || man->type == 17) {
-        /* Straight ahead / follow road: sleek OEM shaft + sharp wide chevron triangle */
-        add_thick_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(60), Y(66), X(60), Y(22), 10.5f * s);
-        add_arrowhead(polys, cnt, w, h, HUD_COLOR_WHITE, X(60), Y(5), 0.0f, 19.0f * s, 17.5f * s);
+    int is_arrival_man = man && (man->type == 10 || man->type == 12 ||
+                                 man->type == 24 || man->type == 25 || man->type == 27);
+
+    if (is_arrived || is_arrival_man) {
+        /* OEM GI: DestinationMan (libVMostAdapter.so @0x2e0adc) style:
+         * native 0x021E HUD_CIRCLE_FILLED destination dot at top + arrow pointing up to it */
+        uint8_t mtype = is_arrival_man ? man->type : 12;
+        float fx = (mtype == 24) ? 46.0f : (mtype == 25) ? 74.0f : 60.0f;
+        uint8_t lw = (uint8_t)lroundf(8.2f * s);
+        if (lw < 2) lw = 2;
+
+        if (mtype == 24 || mtype == 25) {
+            add_circle(polys, cnt, w, h, HUD_COLOR_WHITE, 2, HUD_CIRCLE_FILLED,
+                       X(fx), Y(18.5f), 7.2f * s, 0u, 3599u);
+            add_s_curve_arcs(polys, cnt, w, h, HUD_COLOR_WHITE, lw, X(60), Y(62), X(fx), Y(45.5f), s);
+            add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(fx), Y(45.5f), X(fx), Y(35.0f), (float)lw, 1, 0);
+            add_open_chevron(polys, cnt, w, h, HUD_COLOR_WHITE, X(fx), Y(33.0f), 0.0f, 11.5f * s, 42.0f, 7.0f * s);
+        } else {
+            add_circle(polys, cnt, w, h, HUD_COLOR_WHITE, 2, HUD_CIRCLE_FILLED,
+                       X(60.0f), Y(20.0f), 7.5f * s, 0u, 3599u);
+            add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(60), Y(62), X(60), Y(36.5f), (float)lw, 1, 0);
+            add_open_chevron(polys, cnt, w, h, HUD_COLOR_WHITE, X(60.0f), Y(34.5f), 0.0f, 13.5f * s, 43.0f, 7.4f * s);
+        }
         return;
     }
 
-    if (man->type == 10 || man->type == 12 || man->type == 24 || man->type == 25 || man->type == 27) {
-        /* Arrived destination marker */
-        float fx = (man->type == 24) ? 44.0f : (man->type == 25) ? 76.0f : 60.0f;
-        if (man->type == 24 || man->type == 25) {
-            add_bezier_ribbon(polys, cnt, w, h, HUD_COLOR_WHITE,
-                              X(60), Y(66), X(60), Y(42), X(fx), Y(22), 9.5f * s, 10);
-        } else {
-            add_thick_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(60), Y(66), X(60), Y(22), 9.5f * s);
+    if (!man || man->type == 0 || man->type == 3 || man->type == 5 || man->type == 15 || man->type == 17) {
+        /* Straight ahead / follow road: Apple CarPlay rounded shaft + optional multi-road stubs + open chevron */
+        float jx = 60.0f, jy = 38.0f;
+        if (man && man->type == 3 && man->junction_angle_count > 0) {
+            int has_bg = 0;
+            for (int i = 0; i < man->junction_angle_count; i++) {
+                int d = man->junction_angles[i];
+                if (abs(d) < 18 || abs(abs(d) - 180) < 12) continue;
+                has_bg = 1;
+                float rad = (float)d * ((float)M_PI / 180.0f);
+                add_round_seg(polys, cnt, w, h, HUD_COLOR_DIM,
+                              X(jx), Y(jy),
+                              X(jx + sinf(rad) * 21.0f), Y(jy - cosf(rad) * 21.0f),
+                              6.2f * s, 1, 1);
+            }
+            if (has_bg) {
+                add_round_seg(polys, cnt, w, h, HUD_COLOR_DIM, X(jx), Y(62), X(jx), Y(jy), 6.2f * s, 1, 1);
+            }
         }
-        float flag[8] = {
-            X(fx), Y(7),
-            X(fx + 14), Y(21),
-            X(fx), Y(35),
-            X(fx - 14), Y(21)
-        };
-        add_poly(polys, cnt, w, h, HUD_COLOR_WHITE, 2, HUD_POLY_FILL, flag, 4);
+        add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(60), Y(62), X(60), Y(14), 8.4f * s, 1, 1);
+        add_open_chevron(polys, cnt, w, h, HUD_COLOR_WHITE, X(60), Y(12), 0.0f, 14.5f * s, 43.0f, 7.6f * s);
         return;
     }
 
     if (man->type == 52 || man->type == 53) {
-        /* Highway lane change left/right: smooth single cubic-like double Bezier S-curve */
+        /* Highway lane change left/right: hardware S-curve arcs + open chevron */
         float dir = (man->type == 52) ? -1.0f : 1.0f;
-        float x_src = 60.0f - dir * 18.0f;
-        float x_dst = 60.0f + dir * 18.0f;
-        add_cap_seg(polys, cnt, w, h, HUD_COLOR_DIM, X(x_src), Y(66), X(x_src), Y(13), 6.5f * s);
-
-        add_thick_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(x_src), Y(66), X(x_src), Y(54), 9.5f * s);
-        add_bezier_ribbon(polys, cnt, w, h, HUD_COLOR_WHITE,
-                          X(x_src), Y(54), X(x_src), Y(38), X(60), Y(36), 9.5f * s, 4);
-        add_bezier_ribbon(polys, cnt, w, h, HUD_COLOR_WHITE,
-                          X(60), Y(36), X(x_dst), Y(34), X(x_dst), Y(18), 9.5f * s, 4);
-        add_arrowhead(polys, cnt, w, h, HUD_COLOR_WHITE, X(x_dst), Y(5), 0.0f, 16.0f * s, 15.0f * s);
+        float x_src = 60.0f - dir * 16.0f;
+        float x_dst = 60.0f + dir * 16.0f;
+        uint8_t lw = (uint8_t)lroundf(8.2f * s);
+        if (lw < 2) lw = 2;
+        add_round_seg(polys, cnt, w, h, HUD_COLOR_DIM, X(x_src), Y(62), X(x_src), Y(14), 6.0f * s, 1, 1);
+        add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(x_src), Y(62), X(x_src), Y(57), (float)lw, 1, 1);
+        add_s_curve_arcs(polys, cnt, w, h, HUD_COLOR_WHITE, lw, X(x_src), Y(57), X(x_dst), Y(16), s);
+        add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(x_dst), Y(16), X(x_dst), Y(13.5f), (float)lw, 1, 0);
+        add_open_chevron(polys, cnt, w, h, HUD_COLOR_WHITE, X(x_dst), Y(12.0f), 0.0f, 13.5f * s, 43.0f, 7.4f * s);
         return;
     }
 
     if (man->type == 4 || man->type == 18 || man->type == 26) {
-        /* U-Turn: 1 single continuous polygon with high-density 26-step arch & roomy inner radius */
+        /* U-Turn: rounded vertical entry + hardware 180 deg arc (0x021E) + exit stem + open V-chevron */
         float side = (man->driving_side == 1) ? 1.0f : -1.0f;
-        float cx = 60.0f, cy = 28.0f, r = 18.5f, hw = 4.5f;
-        float r_out = r + hw, r_in = r - hw;
+        float cx = 60.0f, cy = 28.0f, r = 18.0f;
         float x_in = cx - side * r, x_out = cx + side * r;
-        float pts[HUD_MAX_POLY_PTS * 2];
-        int n = 0;
-        int steps = 26;
-        float d0 = (side < 0) ?  90.0f : -90.0f;
-        float d1 = -d0;
+        uint8_t lw = (uint8_t)lroundf(8.2f * s);
+        if (lw < 2) lw = 2;
 
-        /* Outer path: entry bottom -> up -> outer arch -> down exit */
-        pts[n * 2] = X(x_in - side * hw); pts[n * 2 + 1] = Y(66.0f); n++;
-        for (int i = 0; i <= steps; i++) {
-            float deg = d0 + (d1 - d0) * ((float)i / (float)steps);
-            float rad = deg * ((float)M_PI / 180.0f);
-            pts[n * 2]     = X(cx + sinf(rad) * r_out);
-            pts[n * 2 + 1] = Y(cy - cosf(rad) * r_out);
-            n++;
-        }
-        pts[n * 2] = X(x_out + side * hw); pts[n * 2 + 1] = Y(48.0f); n++;
-        /* Inner path back */
-        pts[n * 2] = X(x_out - side * hw); pts[n * 2 + 1] = Y(48.0f); n++;
-        for (int i = steps; i >= 0; i--) {
-            float deg = d0 + (d1 - d0) * ((float)i / (float)steps);
-            float rad = deg * ((float)M_PI / 180.0f);
-            pts[n * 2]     = X(cx + sinf(rad) * r_in);
-            pts[n * 2 + 1] = Y(cy - cosf(rad) * r_in);
-            n++;
-        }
-        pts[n * 2] = X(x_in + side * hw); pts[n * 2 + 1] = Y(66.0f); n++;
-
-        add_poly(polys, cnt, w, h, HUD_COLOR_WHITE, 1, HUD_POLY_FILL, pts, (uint8_t)n);
-        add_arrowhead(polys, cnt, w, h, HUD_COLOR_WHITE, X(x_out), Y(65.0f), 180.0f, 18.0f * s, 16.0f * s);
+        add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(x_in), Y(62), X(x_in), Y(cy), (float)lw, 1, 1);
+        add_circle(polys, cnt, w, h, HUD_COLOR_WHITE, lw, HUD_CIRCLE_ARC,
+                   X(cx), Y(cy), r * s, 0u, 1800u);
+        add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(x_out), Y(cy), X(x_out), Y(54.5f), (float)lw, 1, 0);
+        add_open_chevron(polys, cnt, w, h, HUD_COLOR_WHITE, X(x_out), Y(56.5f), 180.0f, 13.5f * s, 43.0f, 7.4f * s);
         return;
     }
 
     if (is_roundabout_maneuver(man)) {
-        /* 1 continuous seamless ribbon polygon for entry + ring arc + exit! Zero joints, zero breaks! */
-        float cx = 60.0f, cy = 33.0f, r = 14.5f, ring_w = 6.5f;
+        /* Apple CarPlay roundabout using native hardware circular arcs (0x021E Kreisbogen):
+         * dim full ring + proportional dim stubs + white entry stem + white ring arc + white exit stem + open chevron */
+        float cx = 60.0f, cy = 34.0f, r = 15.0f;
+        uint8_t ring_dim_lw = (uint8_t)lroundf(5.8f * s);
+        uint8_t path_lw = (uint8_t)lroundf(7.6f * s);
+        if (ring_dim_lw < 2) ring_dim_lw = 2;
+        if (path_lw < 2) path_lw = 2;
+        float path_w = (float)path_lw;
+
         int exit_deg = resolve_turn_angle(man);
         if (man->type == 19) exit_deg = 180;
 
-        /* 1. Dim base ring in 2 smooth half-ring polygons + rounded unchosen exit stubs */
+        /* 1. Dim background full ring via 0x021E (HUD_CIRCLE_FULL avoids 1-deg gap at 9 o'clock) */
+        add_circle(polys, cnt, w, h, HUD_COLOR_DIM, ring_dim_lw, HUD_CIRCLE_FULL,
+                   X(cx), Y(cy), r * s, 0u, 3599u);
+
+        /* 2. Proportional rounded-cap dimmed exit stubs */
         for (int i = 0; i < man->junction_angle_count; i++) {
             int d = man->junction_angles[i];
             if (abs(d - exit_deg) < 18 || abs(abs(d) - 180) < 12) continue;
             float rad = (float)d * ((float)M_PI / 180.0f);
             float x0 = cx + sinf(rad) * (r + 1.0f);
             float y0 = cy - cosf(rad) * (r + 1.0f);
-            float x1 = cx + sinf(rad) * (r + 10.5f);
-            float y1 = cy - cosf(rad) * (r + 10.5f);
-            add_cap_seg(polys, cnt, w, h, HUD_COLOR_DIM, X(x0), Y(y0), X(x1), Y(y1), 6.0f * s);
+            float x1 = cx + sinf(rad) * (r + 9.5f);
+            float y1 = cy - cosf(rad) * (r + 9.5f);
+            add_round_seg(polys, cnt, w, h, HUD_COLOR_DIM, X(x0), Y(y0), X(x1), Y(y1), 5.6f * s, 1, 1);
         }
-        add_arc_ribbon(polys, cnt, w, h, HUD_COLOR_DIM, X(cx), Y(cy), r * s, -90.0f,  90.0f, ring_w * s, 22);
-        add_arc_ribbon(polys, cnt, w, h, HUD_COLOR_DIM, X(cx), Y(cy), r * s,  90.0f, 270.0f, ring_w * s, 22);
 
-        /* 2. Build 1 single continuous centerline from bottom (60,66) -> entry curve -> ring arc -> exit curve -> arm */
         int ccw = (man->driving_side == 0);
-        float dir_sign = ccw ? -1.0f : 1.0f; /* ccw: 180 -> 90 -> 0 -> -90 */
         int render_exit = exit_deg;
         if (abs(abs(render_exit) - 180) < 10) {
-            render_exit = ccw ? -130 : 130;
+            render_exit = ccw ? -135 : 135;
         }
-        int norm_exit = ((render_exit % 360) + 360) % 360;
-        int sweep = ccw ? ((180 - norm_exit + 360) % 360) : ((norm_exit - 180 + 360) % 360);
-        if (sweep == 0) sweep = 360;
+        uint32_t exit_hud = screen_deg_to_hud_01deg((float)render_exit);
+        uint32_t entry_hud = 2700u; /* 180 deg screen (6 o'clock) -> 2700 (0.1 deg) */
 
-        float fillet_deg = (sweep <= 100) ? 18.0f : 22.0f;
-        if (fillet_deg > (float)sweep * 0.4f) fillet_deg = (float)sweep * 0.4f;
-        float r_tan = r / cosf(fillet_deg * ((float)M_PI / 180.0f)); /* exact tangent intersection radius */
-        float r_stem = r_tan + 4.5f;
+        /* 3. White entry stem from bottom to ring bottom (with round caps at both ends for seamless join) */
+        add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(cx), Y(62.5f), X(cx), Y(cy + r), path_w, 1, 1);
 
-        float cpx[32], cpy[32];
-        int k = 0;
-        /* Entry straight bottom */
-        cpx[k] = X(cx); cpy[k] = Y(66.0f); k++;
-
-        /* Entry G1 tangent Bezier: (cx, cy + r_stem) -> P1=(cx, cy + r_tan) -> ring(180 + dir_sign*fillet_deg) */
-        float entry_ang = 180.0f + dir_sign * fillet_deg;
-        float earad = entry_ang * ((float)M_PI / 180.0f);
-        float e0x = cx, e0y = cy + r_stem;
-        float e1x = cx, e1y = cy + r_tan;
-        float e2x = cx + sinf(earad) * r, e2y = cy - cosf(earad) * r;
-        for (int i = 0; i <= 4 && k < 31; i++) {
-            float t = (float)i / 4.0f, mt = 1.0f - t;
-            cpx[k] = X(mt * mt * e0x + 2.0f * mt * t * e1x + t * t * e2x);
-            cpy[k] = Y(mt * mt * e0y + 2.0f * mt * t * e1y + t * t * e2y);
-            k++;
+        /* 4. White roundabout arc via 0x021E (RHT sweeps CCW: start=exit -> end=2700; LHT sweeps CW: start=2700 -> end=exit) */
+        if (exit_hud != entry_hud) {
+            uint32_t a_start = ccw ? exit_hud : entry_hud;
+            uint32_t a_end   = ccw ? entry_hud : exit_hud;
+            add_circle(polys, cnt, w, h, HUD_COLOR_WHITE, path_lw, HUD_CIRCLE_ARC,
+                       X(cx), Y(cy), r * s, a_start, a_end);
         }
 
-        /* Ring arc points strictly between entry_ang and arc_end */
-        float arc_end = 180.0f + dir_sign * ((float)sweep - fillet_deg);
-        int arc_n = (sweep >= 240) ? 16 : (sweep >= 150) ? 12 : 7;
-        for (int i = 1; i < arc_n && k < 25; i++) {
-            float deg = entry_ang + (arc_end - entry_ang) * ((float)i / (float)arc_n);
-            float rad = deg * ((float)M_PI / 180.0f);
-            cpx[k] = X(cx + sinf(rad) * r);
-            cpy[k] = Y(cy - cosf(rad) * r);
-            k++;
-        }
-
-        /* Exit G1 tangent Bezier: ring(arc_end) -> P1=(cx + ux*r_tan, cy + uy*r_tan) -> (cx + ux*r_stem, cy + uy*r_stem) */
+        /* 5. White exit stem + open V-chevron */
         float exr = (float)render_exit * ((float)M_PI / 180.0f);
         float ux = sinf(exr), uy = -cosf(exr);
-        float aend_rad = arc_end * ((float)M_PI / 180.0f);
-        float x0x = cx + sinf(aend_rad) * r, x0y = cy - cosf(aend_rad) * r;
-        float x1x = cx + ux * r_tan, x1y = cy + uy * r_tan;
-        float x2x = cx + ux * r_stem, x2y = cy + uy * r_stem;
-        for (int i = 0; i <= 4 && k < 31; i++) {
-            float t = (float)i / 4.0f, mt = 1.0f - t;
-            cpx[k] = X(mt * mt * x0x + 2.0f * mt * t * x1x + t * t * x2x);
-            cpy[k] = Y(mt * mt * x0y + 2.0f * mt * t * x1y + t * t * x2y);
-            k++;
-        }
-
-        /* Exit straight lead into arrowhead */
-        if (k < 32) {
-            cpx[k] = X(cx + ux * (r + 10.5f));
-            cpy[k] = Y(cy + uy * (r + 10.5f));
-            k++;
-        }
-
-        add_polyline_ribbon(polys, cnt, w, h, HUD_COLOR_WHITE, cpx, cpy, k, ring_w * s);
-        add_arrowhead(polys, cnt, w, h, HUD_COLOR_WHITE,
-                      X(cx + ux * (r + 18.0f)), Y(cy + uy * (r + 18.0f)),
-                      (float)render_exit, 13.0f * s, 12.0f * s);
+        add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE,
+                      X(cx + ux * r), Y(cy + uy * r),
+                      X(cx + ux * (r + 14.5f)), Y(cy + uy * (r + 14.5f)),
+                      path_w, 1, 0);
+        add_open_chevron(polys, cnt, w, h, HUD_COLOR_WHITE,
+                         X(cx + ux * (r + 16.0f)), Y(cy + uy * (r + 16.0f)),
+                         (float)render_exit, 11.5f * s, 43.0f, 6.8f * s);
         return;
     }
 
-    /* Standard intersection turn / off-ramp / Y-fork:
-     * True Bezier-curved active path + cohesive grey cross-roads behind it! */
+    /* Standard & multi-road intersection turn / off-ramp / Y-fork (Apple CarPlay style):
+     * Proportional rounded-cap dimmed junction stubs + straight entry/exit stems + hardware circular arc (0x021E) + open V-chevron */
     int turn_deg = resolve_turn_angle(man);
-    float jx = 60.0f, jy = 36.0f;
+    int abs_deg = abs(turn_deg);
+    float jx = 60.0f;
+    float jy = (abs_deg >= 115) ? 21.0f : (abs_deg <= 60) ? 39.0f : 36.0f;
 
-    /* 1. Background non-taken junction roads: clean cohesive grey intersection */
+    /* 1. Proportional rounded-cap dimmed background stubs for other roads at the junction */
     int has_bg = 0;
     int has_forward = 0;
     for (int i = 0; i < man->junction_angle_count; i++) {
@@ -930,62 +936,85 @@ static void render_guiding_icon(const RgdManeuver *man, uint16_t w, uint16_t h,
         if (abs(d - turn_deg) < 18 || abs(abs(d) - 180) < 12) continue;
         has_bg = 1;
         float rad = (float)d * ((float)M_PI / 180.0f);
-        float bg_len = (d == 0) ? 23.0f : (abs(d) <= 45) ? 24.0f : 31.0f;
-        add_cap_seg(polys, cnt, w, h, HUD_COLOR_DIM,
-                    X(jx), Y(jy),
-                    X(jx + sinf(rad) * bg_len), Y(jy - cosf(rad) * bg_len), 6.5f * s);
+        float bg_len = (abs(d) <= 45) ? 19.5f : 20.5f;
+        add_round_seg(polys, cnt, w, h, HUD_COLOR_DIM,
+                      X(jx), Y(jy),
+                      X(jx + sinf(rad) * bg_len), Y(jy - cosf(rad) * bg_len),
+                      6.0f * s, 1, 1);
     }
     if ((man->type == 8 || man->type == 22 || man->type == 23) && !has_forward) {
         has_bg = 1;
-        add_cap_seg(polys, cnt, w, h, HUD_COLOR_DIM, X(jx), Y(jy), X(jx), Y(12), 7.0f * s);
+        add_round_seg(polys, cnt, w, h, HUD_COLOR_DIM, X(jx), Y(jy), X(jx), Y(jy - 19.5f), 6.0f * s, 1, 1);
     }
     if (has_bg) {
-        /* Draw grey incoming base road so all grey arms connect naturally */
-        add_thick_seg(polys, cnt, w, h, HUD_COLOR_DIM, X(jx), Y(66), X(jx), Y(jy), 6.5f * s);
+        add_round_seg(polys, cnt, w, h, HUD_COLOR_DIM, X(jx), Y(62), X(jx), Y(jy), 6.0f * s, 1, 1);
     }
 
-    /* 2. Active white path with TRUE constant-radius circular fillet (smooth uniform arc!) */
-    int abs_deg = abs(turn_deg);
+    /* 2. Active white path with hardware circular arc fillet + open V-chevron */
     float trad = (float)turn_deg * ((float)M_PI / 180.0f);
     float ux = sinf(trad), uy = -cosf(trad);
-    float bend_jy = (abs_deg >= 115) ? 24.0f : jy;
 
-    if (abs_deg < 8) {
-        add_thick_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(jx), Y(66), X(jx), Y(22), 10.5f * s);
-        add_arrowhead(polys, cnt, w, h, HUD_COLOR_WHITE, X(jx), Y(5), 0.0f, 19.0f * s, 17.5f * s);
+    if (abs_deg < 12) {
+        if (abs_deg < 5) {
+            add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(jx), Y(62), X(jx), Y(14), 8.4f * s, 1, 1);
+            add_open_chevron(polys, cnt, w, h, HUD_COLOR_WHITE, X(jx), Y(12), 0.0f, 14.5f * s, 43.0f, 7.6f * s);
+        } else {
+            add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(jx), Y(62), X(jx), Y(jy + 6.0f), 8.4f * s, 1, 1);
+            add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(jx), Y(jy + 6.0f), X(jx + ux * 24.0f), Y(jy + 6.0f + uy * 24.0f), 8.4f * s, 1, 0);
+            add_open_chevron(polys, cnt, w, h, HUD_COLOR_WHITE, X(jx + ux * 25.5f), Y(jy + 6.0f + uy * 25.5f), (float)turn_deg, 13.8f * s, 43.0f, 7.6f * s);
+        }
     } else {
         float side = (turn_deg > 0) ? 1.0f : -1.0f;
         float half_rad = ((float)abs_deg * 0.5f) * ((float)M_PI / 180.0f);
         float tan_h = tanf(half_rad);
-        /* Choose tangent offset d inside [14..23] and derive exact constant fillet radius R */
-        float desired_R = (abs_deg <= 60) ? 26.0f : (abs_deg <= 105) ? 20.0f : 15.0f;
+        float desired_R = (abs_deg <= 60) ? 24.0f : (abs_deg <= 105) ? 18.0f : 14.0f;
         float d = desired_R * tan_h;
-        if (d > 22.0f) { d = 22.0f; desired_R = d / tan_h; }
-        if (d < 12.0f) { d = 12.0f; desired_R = d / tan_h; }
+        if (d > 21.0f) { d = 21.0f; desired_R = d / tan_h; }
+        if (d < 8.0f)  { d = 8.0f;  desired_R = d / tan_h; }
+        /* Keep arc center X safely inside [8, 112] in 120-space */
+        if (desired_R > 48.0f) { desired_R = 48.0f; d = desired_R * tan_h; }
 
-        float p0x = jx, p0y = bend_jy + d;
-        float p2x = jx + ux * d, p2y = bend_jy + uy * d;
-        float fc_x = jx + side * desired_R;
-        float fc_y = p0y;
-        float deg0 = (side > 0) ? -90.0f : 90.0f;
-        float deg1 = deg0 + (float)turn_deg;
-        int arc_steps = (abs_deg <= 55) ? 6 : (abs_deg <= 105) ? 9 : 11;
+        float p0y = jy + d;
+        float fc_y_px = roundf(Y(p0y));
+        float r_px = roundf(desired_R * s);
+        if (r_px < 2.0f) r_px = 2.0f;
+        float fc_x_px = roundf(X(jx) + side * r_px);
+        float sx_px = fc_x_px - side * r_px;
+        uint8_t lw = (uint8_t)lroundf(8.4f * s);
+        if (lw < 2) lw = 2;
 
-        if (p0y < 65.5f) {
-            add_thick_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(jx), Y(66), X(p0x), Y(p0y), 10.5f * s);
+        /* Entry straight stem (aligned exactly to snapped 0x021E start tangent) */
+        if (fc_y_px < Y(61.0f)) {
+            add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, sx_px, Y(62.0f), sx_px, fc_y_px, (float)lw, 1, 1);
+        } else {
+            add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, sx_px, fc_y_px + 1.0f, sx_px, fc_y_px, (float)lw, 1, 1);
         }
-        add_arc_ribbon(polys, cnt, w, h, HUD_COLOR_WHITE,
-                       X(fc_x), Y(fc_y), desired_R * s,
-                       deg0, deg1, 10.5f * s, arc_steps);
 
-        float lead = (abs_deg <= 60) ? 4.0f : (abs_deg <= 105) ? 5.0f : 4.0f;
-        float tip_dist = d + 17.0f;
-        add_thick_seg(polys, cnt, w, h, HUD_COLOR_WHITE,
-                      X(p2x), Y(p2y),
-                      X(jx + ux * (d + lead)), Y(bend_jy + uy * (d + lead)), 10.5f * s);
-        add_arrowhead(polys, cnt, w, h, HUD_COLOR_WHITE,
-                      X(jx + ux * tip_dist), Y(bend_jy + uy * tip_dist),
-                      (float)turn_deg, 17.5f * s, 16.5f * s);
+        /* Hardware circular arc fillet via 0x021E */
+        uint32_t a_start, a_end;
+        if (turn_deg > 0) {
+            a_start = screen_deg_to_hud_01deg(-90.0f);
+            a_end   = screen_deg_to_hud_01deg(-90.0f + (float)turn_deg);
+        } else {
+            a_start = screen_deg_to_hud_01deg(90.0f + (float)turn_deg);
+            a_end   = screen_deg_to_hud_01deg(90.0f);
+        }
+        add_circle(polys, cnt, w, h, HUD_COLOR_WHITE, lw, HUD_CIRCLE_ARC,
+                   fc_x_px, fc_y_px, r_px, a_start, a_end);
+
+        /* Exit straight stem starting cleanly at the snapped integer 0x021E endpoint */
+        float abs_rad = (float)abs_deg * ((float)M_PI / 180.0f);
+        float ex_px = fc_x_px - side * r_px * cosf(abs_rad);
+        float ey_px = fc_y_px - r_px * sinf(abs_rad);
+        float neck_px = ((abs_deg <= 60) ? 17.0f : (abs_deg <= 105) ? 15.0f : 14.0f) * s;
+        float tip_px = neck_px + 1.5f * s;
+        add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE,
+                      ex_px - ux * 0.5f, ey_px - uy * 0.5f,
+                      ex_px + ux * neck_px, ey_px + uy * neck_px,
+                      (float)lw, 1, 0);
+        add_open_chevron(polys, cnt, w, h, HUD_COLOR_WHITE,
+                         ex_px + ux * tip_px, ey_px + uy * tip_px,
+                         (float)turn_deg, 13.8f * s, 43.0f, 7.6f * s);
     }
 
     #undef X
@@ -994,30 +1023,124 @@ static void render_guiding_icon(const RgdManeuver *man, uint16_t w, uint16_t h,
 
 /* ==================== LaneGuidance (184 x 17) Renderer ==================== */
 
+/* Compact symmetric 4-point notched chevron arrowhead for 17px LaneGuidance
+ * (avoids thin diagonal integer-quantization dropouts while keeping an open-chevron notch). */
+static void add_lane_arrowhead(HudPolygonCmd *arr, uint8_t *cnt,
+                               uint16_t w, uint16_t h,
+                               uint8_t color, float tip_x, float tip_y, float deg,
+                               float len_px, float half_w_px, float notch_px) {
+    float rad = deg * ((float)M_PI / 180.0f);
+    float ux = sinf(rad), uy = -cosf(rad);
+    float nx = -uy,       ny =  ux;
+    float pts[8] = {
+        tip_x,                                         tip_y,
+        tip_x - ux * len_px + nx * half_w_px,          tip_y - uy * len_px + ny * half_w_px,
+        tip_x - ux * (len_px - notch_px),              tip_y - uy * (len_px - notch_px),
+        tip_x - ux * len_px - nx * half_w_px,          tip_y - uy * len_px - ny * half_w_px
+    };
+    add_poly(arr, cnt, w, h, color, 1, HUD_POLY_FILL, pts, 4);
+}
+
 static void draw_lane_branch(HudPolygonCmd *polys, uint8_t *cnt,
                              uint16_t w, uint16_t h,
-                             float cx, float cy, float h_scale,
-                             int16_t angle, uint8_t color, float stem_w) {
+                             float cx, float y_bot, float h_scale,
+                             int16_t angle, uint8_t color, uint8_t lw,
+                             float stem_thick, int draw_entry_stem) {
+    int abs_a = abs((int)angle);
+    float ah_len   = 3.8f * h_scale;
+    float ah_hw    = 2.9f * h_scale;
+    float ah_notch = 1.0f * h_scale;
+
+    if (abs_a < 15) {
+        /* Straight lane arrow: exact integer-aligned vertical stem + symmetric notched chevron */
+        float y_top = 4.0f * h_scale;
+        float y_tip = 2.0f * h_scale;
+        if (draw_entry_stem) {
+            add_round_seg(polys, cnt, w, h, color, cx, y_bot, cx, y_top, stem_thick, 1, 0);
+        } else {
+            add_round_seg(polys, cnt, w, h, color, cx, 10.0f * h_scale, cx, y_top, stem_thick, 1, 0);
+        }
+        add_lane_arrowhead(polys, cnt, w, h, color, cx, y_tip, 0.0f, ah_len, ah_hw, ah_notch);
+        return;
+    }
+
+    if (abs_a >= 160) {
+        /* U-Turn lane arrow using 0x021E 180-deg top semicircle (integer center & radius) */
+        float side = (angle > 0) ? 1.0f : -1.0f;
+        float r_px = roundf(3.5f * h_scale);
+        if (r_px < 3.0f) r_px = 3.0f;
+        float arc_cy = roundf(6.0f * h_scale);
+        float arc_cx = roundf(cx + side * r_px);
+        float ix = arc_cx - side * r_px;
+        float ex = arc_cx + side * r_px;
+        if (draw_entry_stem) {
+            add_round_seg(polys, cnt, w, h, color, ix, y_bot, ix, arc_cy, stem_thick, 1, 0);
+        }
+        add_circle(polys, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
+                   arc_cx, arc_cy, r_px,
+                   screen_deg_to_hud_01deg(-90.0f),
+                   screen_deg_to_hud_01deg(90.0f));
+        add_round_seg(polys, cnt, w, h, color, ex, arc_cy, ex, 11.0f * h_scale, stem_thick, 0, 0);
+        add_lane_arrowhead(polys, cnt, w, h, color, ex, 13.0f * h_scale, 180.0f,
+                           3.4f * h_scale, 2.7f * h_scale, 0.9f * h_scale);
+        return;
+    }
+
+    /* Turn branch (15..159 deg): integer-snapped arc center & radius so stems meet 0x021E with zero notch */
+    float side = (angle > 0) ? 1.0f : -1.0f;
     float rad = (float)angle * ((float)M_PI / 180.0f);
     float ux = sinf(rad), uy = -cosf(rad);
-    float branch_len = (abs(angle) >= 60) ? 7.4f * h_scale : 6.8f * h_scale;
-    float tip_len = branch_len + 3.6f * h_scale;
-    float ax = cx + ux * branch_len;
-    float ay = cy + uy * branch_len;
-    float tx = cx + ux * tip_len;
-    float ty = cy + uy * tip_len;
+    float abs_rad = (float)abs_a * ((float)M_PI / 180.0f);
 
-    if (abs(angle) >= 30) {
-        /* Smooth 2-step curved elbow for turning lane branches */
-        add_bezier_ribbon(polys, cnt, w, h, color,
-                          cx, cy + 2.2f * h_scale,
-                          cx, cy,
-                          ax, ay,
-                          stem_w, 2);
-    } else {
-        add_thick_seg(polys, cnt, w, h, color, cx, cy, ax, ay, stem_w);
+    float desired_R = (abs_a <= 55) ? 6.0f * h_scale : (abs_a <= 105) ? 4.0f * h_scale : 3.0f * h_scale;
+    float r_int = roundf(desired_R);
+    if (r_int < 2.0f) r_int = 2.0f;
+
+    /* Integer arc center: p0y chosen so top of arc stays clean inside [2..15] */
+    float p0y_int = roundf((abs_a <= 55) ? 11.0f * h_scale : (abs_a <= 105) ? 10.0f * h_scale : 11.0f * h_scale);
+    float fc_x = roundf(cx + side * r_int);
+    float fc_y = p0y_int;
+    float sx = fc_x - side * r_int; /* exact tangent start X on integer grid */
+
+    if (draw_entry_stem && p0y_int < y_bot - 0.4f * h_scale) {
+        add_round_seg(polys, cnt, w, h, color, sx, y_bot, sx, p0y_int, stem_thick, 1, 0);
     }
-    add_arrowhead(polys, cnt, w, h, color, tx, ty, (float)angle, 4.8f * h_scale, 3.8f * h_scale);
+
+    uint32_t a_start, a_end;
+    if (angle > 0) {
+        a_start = screen_deg_to_hud_01deg(-90.0f);
+        a_end   = screen_deg_to_hud_01deg(-90.0f + (float)angle);
+    } else {
+        a_start = screen_deg_to_hud_01deg(90.0f + (float)angle);
+        a_end   = screen_deg_to_hud_01deg(90.0f);
+    }
+    add_circle(polys, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
+               fc_x, fc_y, r_int, a_start, a_end);
+
+    /* Exact endpoint of the integer 0x021E circle at angle `angle` */
+    float ex = fc_x - side * r_int * cosf(abs_rad);
+    float ey = fc_y - r_int * sinf(abs_rad);
+
+    float neck_len = (abs_a <= 55) ? 4.4f * h_scale : (abs_a <= 105) ? 4.8f * h_scale : 2.8f * h_scale;
+    float tip_x = ex + ux * (neck_len + 2.0f * h_scale);
+    float tip_y = ey + uy * (neck_len + 2.0f * h_scale);
+    /* Start exit stem 0.4px inside the arc so integer rounding never leaves a gap */
+    add_round_seg(polys, cnt, w, h, color,
+                  ex - ux * 0.4f, ey - uy * 0.4f,
+                  ex + ux * neck_len, ey + uy * neck_len,
+                  stem_thick, 0, 0);
+    add_lane_arrowhead(polys, cnt, w, h, color, tip_x, tip_y, (float)angle,
+                       ah_len, ah_hw, ah_notch);
+}
+
+static void add_lane_ellipsis(HudPolygonCmd *polys, uint8_t *cnt,
+                              uint16_t w, uint16_t h,
+                              float cx_start, float step_x, float cy, float h_scale) {
+    /* BMW/MINI factory LaneGuidance style: 3 0x021E filled dots when lanes overflow */
+    for (int d = 0; d < 3; d++) {
+        add_circle(polys, cnt, w, h, HUD_COLOR_DIM, 1, HUD_CIRCLE_FILLED,
+                   cx_start + (float)d * step_x, cy, 1.0f * h_scale, 0, 3599);
+    }
 }
 
 static void render_lane_guidance(const RgdLaneEvent *le, uint16_t w, uint16_t h,
@@ -1025,21 +1148,49 @@ static void render_lane_guidance(const RgdLaneEvent *le, uint16_t w, uint16_t h,
     *cnt = 0;
     if (!le || le->lane_count == 0) return;
 
-    int n = le->lane_count;
-    if (n > HUD_MAX_LANES) n = HUD_MAX_LANES;
+    int total_n = le->lane_count;
+    if (total_n > HUD_MAX_LANES) total_n = HUD_MAX_LANES;
     float h_scale = (float)h / 17.0f;
-    float slot_w = (float)w / (float)(n < 4 ? 4 : n);
-    if (slot_w > 28.0f) slot_w = 28.0f;
-    if (slot_w < 18.0f) slot_w = (float)w / (float)n;
+
+    /* Show up to 7 lanes directly; if > 7, focus a 6-lane window around recommended lanes + ... dots */
+    int win_start = 0;
+    int n = total_n;
+    if (total_n > 7) {
+        int good_min = -1, good_max = -1;
+        for (int i = 0; i < total_n; i++) {
+            if (le->lanes[i].status >= 1) {
+                if (good_min < 0) good_min = i;
+                good_max = i;
+            }
+        }
+        n = 6;
+        if (good_min >= 0) {
+            int center = (good_min + good_max) / 2;
+            win_start = center - n / 2;
+            if (win_start < 0) win_start = 0;
+            if (win_start + n > total_n) win_start = total_n - n;
+        }
+    }
+    int trunc_left  = (win_start > 0);
+    int trunc_right = (win_start + n < total_n);
+
+    float avail_w = (float)w - (trunc_left ? 16.0f : 0.0f) - (trunc_right ? 16.0f : 0.0f);
+    /* Keep slot_w an even integer so all lane centers cx fall on exact integer pixels */
+    float slot_w = (trunc_left || trunc_right) ? 24.0f * h_scale : 26.0f * h_scale;
+    if (slot_w * (float)n > avail_w) slot_w = floorf((avail_w / (float)n) * 0.5f) * 2.0f;
+    if (slot_w < 16.0f) slot_w = 16.0f;
 
     float total_w = slot_w * (float)n;
-    float start_x = ((float)w - total_w) * 0.5f;
+    float left_pad = trunc_left ? 16.0f : 0.0f;
+    float start_x = roundf(left_pad + (avail_w - total_w) * 0.5f);
+    float y_bot = roundf((float)h - 1.5f * h_scale);
 
-    float y_bot = (float)h - 1.5f * h_scale;
-    float y_split = (float)h * 0.60f;
+    if (trunc_left) {
+        add_lane_ellipsis(polys, cnt, w, h, start_x - 12.0f, 3.5f, 8.5f * h_scale, h_scale);
+    }
 
     for (int i = 0; i < n; i++) {
-        const RgdLaneInfo *ln = &le->lanes[i];
+        const RgdLaneInfo *ln = &le->lanes[win_start + i];
         float cx = start_x + ((float)i + 0.5f) * slot_w;
         int is_good = (ln->status >= 1);
 
@@ -1048,12 +1199,11 @@ static void render_lane_guidance(const RgdLaneEvent *le, uint16_t w, uint16_t h,
         else if (ln->angle_count > 0) hi = ln->angles[0];
 
         uint8_t base_color = is_good ? HUD_COLOR_WHITE : HUD_COLOR_DIM;
-        float stem_w = is_good ? 2.6f * h_scale : 2.0f * h_scale;
+        /* Exact integer-matched stroke width (lw = 2) so 0x021E arcs and stems join flush */
+        uint8_t lw = (uint8_t)lroundf(2.0f * h_scale);
+        if (lw < 2) lw = 2;
+        float stem_thick = (float)lw;
 
-        /* Base vertical stem at bottom of lane */
-        add_thick_seg(polys, cnt, w, h, base_color, cx, y_bot, cx, y_split, stem_w);
-
-        /* Draw all non-highlighted angles first in dimmed color */
         int drew_any = 0;
         int drew_hi = 0;
         for (int k = 0; k < (int)ln->angle_count; k++) {
@@ -1062,24 +1212,31 @@ static void render_lane_guidance(const RgdLaneEvent *le, uint16_t w, uint16_t h,
                 drew_hi = 1;
                 continue; /* draw highlighted on top */
             }
-            draw_lane_branch(polys, cnt, w, h, cx, y_split, h_scale, a, HUD_COLOR_DIM, 2.0f * h_scale);
+            /* Draw full dim entry stem for non-good lanes (handles multi-turn e.g. -45 + 90 cleanly) */
+            int draw_stem = !is_good;
+            draw_lane_branch(polys, cnt, w, h, cx, y_bot, h_scale, a, HUD_COLOR_DIM, lw, stem_thick, draw_stem);
             drew_any = 1;
         }
         if (is_good && valid_angle(hi)) {
-            draw_lane_branch(polys, cnt, w, h, cx, y_split, h_scale, hi, HUD_COLOR_WHITE, 2.6f * h_scale);
+            draw_lane_branch(polys, cnt, w, h, cx, y_bot, h_scale, hi, HUD_COLOR_WHITE, lw, stem_thick, 1);
             drew_any = 1;
             drew_hi = 1;
         }
         if (!drew_any && !drew_hi) {
             /* Fallback straight arrow if phone sent lane slot without angles */
-            draw_lane_branch(polys, cnt, w, h, cx, y_split, h_scale, 0, base_color, stem_w);
+            draw_lane_branch(polys, cnt, w, h, cx, y_bot, h_scale, 0, base_color, lw, stem_thick, 1);
         }
 
-        /* Lane separator tick between lanes */
+        /* Crisp 2-dash highway lane divider between lanes */
         if (i + 1 < n) {
             float sx = start_x + (float)(i + 1) * slot_w;
-            add_thick_seg(polys, cnt, w, h, HUD_COLOR_DIM, sx, y_bot, sx, y_bot - 3.5f * h_scale, 1.2f);
+            add_thick_seg(polys, cnt, w, h, HUD_COLOR_DIM, sx, y_bot, sx, 11.5f * h_scale, 1.2f * h_scale);
+            add_thick_seg(polys, cnt, w, h, HUD_COLOR_DIM, sx, 6.5f * h_scale, sx, 2.5f * h_scale, 1.2f * h_scale);
         }
+    }
+
+    if (trunc_right) {
+        add_lane_ellipsis(polys, cnt, w, h, start_x + total_w + 5.0f, 3.5f, 8.5f * h_scale, h_scale);
     }
 }
 
@@ -1103,9 +1260,26 @@ void hud_render_build_frame(const RgdState *st, uint64_t now_ms,
     format_distance(st, out->dist_text, sizeof(out->dist_text), out->unit_text, sizeof(out->unit_text));
 
     const RgdManeuver *man = st->has_man_current ? find_maneuver(st, st->man_current_idx) : NULL;
-    if (!man && st->man_count > 0) man = find_maneuver(st, 0);
+    if (!man && st->man_count > 0 && st->route_state != 2) man = find_maneuver(st, 0);
 
-    if (man && man->after_road[0] != '\0') {
+    int is_arrived_state = (st->route_state == 2);
+    int is_arrival_man = man && (man->type == 10 || man->type == 12 ||
+                                 man->type == 24 || man->type == 25 || man->type == 27);
+    if (is_arrived_state && !is_arrival_man) {
+        man = NULL;
+    }
+
+    if (is_arrived_state || is_arrival_man) {
+        if (st->dest_name[0] != '\0') {
+            snprintf(out->street_text, sizeof(out->street_text), "%s", st->dest_name);
+        } else if (man && man->desc[0] != '\0') {
+            snprintf(out->street_text, sizeof(out->street_text), "%s", man->desc);
+        } else if (man && man->after_road[0] != '\0') {
+            snprintf(out->street_text, sizeof(out->street_text), "%s", man->after_road);
+        } else if (st->current_road[0] != '\0') {
+            snprintf(out->street_text, sizeof(out->street_text), "%s", st->current_road);
+        }
+    } else if (man && man->after_road[0] != '\0') {
         snprintf(out->street_text, sizeof(out->street_text), "%s", man->after_road);
     } else if (st->current_road[0] != '\0') {
         snprintf(out->street_text, sizeof(out->street_text), "%s", st->current_road);
@@ -1115,16 +1289,18 @@ void hud_render_build_frame(const RgdState *st, uint64_t now_ms,
         snprintf(out->street_text, sizeof(out->street_text), "%s", st->dest_name);
     }
 
-    render_guiding_icon(man, icon_w, icon_h, out->icon_polys, &out->icon_poly_count);
+    render_guiding_icon(man, is_arrived_state, icon_w, icon_h, out->icon_polys, &out->icon_poly_count);
 
     const RgdLaneEvent *le = NULL;
-    if (st->lane_guidance_showing == 1 && st->has_lane_idx) {
-        le = find_lane_event(st, st->lane_guidance_idx);
-    } else if (!st->has_lane_showing) {
-        if (st->has_lane_idx) {
+    if (!is_arrived_state) {
+        if (st->lane_guidance_showing == 1 && st->has_lane_idx) {
             le = find_lane_event(st, st->lane_guidance_idx);
-        } else if (man && man->has_linked_lane) {
-            le = find_lane_event(st, man->linked_lane_idx);
+        } else if (!st->has_lane_showing) {
+            if (st->has_lane_idx) {
+                le = find_lane_event(st, st->lane_guidance_idx);
+            } else if (man && man->has_linked_lane) {
+                le = find_lane_event(st, man->linked_lane_idx);
+            }
         }
     }
     if (le && le->lane_count > 0) {

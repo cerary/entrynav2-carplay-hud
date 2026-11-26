@@ -123,6 +123,13 @@ static void put_be16(uint8_t *p, uint16_t v) {
     p[1] = (uint8_t)(v & 0xFF);
 }
 
+static void put_be32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)((v >> 24) & 0xFF);
+    p[1] = (uint8_t)((v >> 16) & 0xFF);
+    p[2] = (uint8_t)((v >> 8) & 0xFF);
+    p[3] = (uint8_t)(v & 0xFF);
+}
+
 static uint16_t get_be16(const uint8_t *p) {
     return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
 }
@@ -330,6 +337,21 @@ static int send_hud_polygon(uint16_t dev, uint16_t inst_id, const HudPolygonCmd 
                          VMOST_OP_START_RES_ACK, 2, buf, (uint16_t)(6 + cmd->num_pts * 4));
 }
 
+static int send_hud_circle(uint16_t dev, uint16_t inst_id, const HudPolygonCmd *cmd) {
+    uint8_t buf[19];
+    if (!cmd) return -1;
+    put_be16(buf + 0, inst_id);
+    put_be16(buf + 2, 0x0000);
+    buf[4] = cmd->circle_type;
+    put_be16(buf + 5, cmd->cx);
+    put_be16(buf + 7, cmd->cy);
+    put_be16(buf + 9, cmd->radius);
+    put_be32(buf + 11, cmd->start_01deg);
+    put_be32(buf + 15, cmd->end_01deg);
+    return send_msg_type(dev, HUD_FBLOCK_ID, HUD_INST_ID, HUD_FUNC_IMAGE_ADD_CIRCLE,
+                         VMOST_OP_START_RES_ACK, 2, buf, sizeof(buf));
+}
+
 static void draw_poly_list(uint16_t dev, uint16_t inst_id,
                            const HudPolygonCmd *polys, uint8_t count) {
     send_hud_u16(dev, HUD_FUNC_IMAGE_REMOVE_ALL_ITEMS, VMOST_OP_START_RES_ACK, inst_id);
@@ -344,15 +366,23 @@ static void draw_poly_list(uint16_t dev, uint16_t inst_id,
             send_hud_u16_u8(dev, HUD_FUNC_IMAGE_SET_LINE_COLOR, VMOST_OP_SET, inst_id, p->color);
             cur_lc = p->color;
         }
-        if ((int)p->fill_mode != cur_fm) {
-            send_hud_u16_u8(dev, HUD_FUNC_IMAGE_SET_FILL_MODE, VMOST_OP_START_RESULT, inst_id, p->fill_mode);
-            cur_fm = p->fill_mode;
+        if (p->kind == HUD_CMD_CIRCLE) {
+            if ((int)p->fill_color != cur_fc) {
+                send_hud_u16_u8(dev, HUD_FUNC_IMAGE_SET_FILL_COLOR, VMOST_OP_START_RESULT, inst_id, p->fill_color);
+                cur_fc = p->fill_color;
+            }
+            send_hud_circle(dev, inst_id, p);
+        } else {
+            if ((int)p->fill_mode != cur_fm) {
+                send_hud_u16_u8(dev, HUD_FUNC_IMAGE_SET_FILL_MODE, VMOST_OP_START_RESULT, inst_id, p->fill_mode);
+                cur_fm = p->fill_mode;
+            }
+            if ((int)p->fill_color != cur_fc) {
+                send_hud_u16_u8(dev, HUD_FUNC_IMAGE_SET_FILL_COLOR, VMOST_OP_START_RESULT, inst_id, p->fill_color);
+                cur_fc = p->fill_color;
+            }
+            send_hud_polygon(dev, inst_id, p);
         }
-        if ((int)p->fill_color != cur_fc) {
-            send_hud_u16_u8(dev, HUD_FUNC_IMAGE_SET_FILL_COLOR, VMOST_OP_START_RESULT, inst_id, p->fill_color);
-            cur_fc = p->fill_color;
-        }
-        send_hud_polygon(dev, inst_id, p);
     }
 }
 
