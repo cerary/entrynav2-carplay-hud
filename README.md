@@ -2,6 +2,10 @@
 
 **语言 / Language：** [简体中文](README.md) | [English](README.en.md)
 
+> **如果这个项目对你有帮助或启发，欢迎点击右上角点个 Star ⭐ 支持一下！**
+>
+> **原创声明与非商业许可**：本项目全部纯 C 核心代码均由作者独立抓包分析与从零编写，仅允许个人学习、技术研究与非商业自用，**严禁用于任何商业用途**（详情见文末与 [LICENSE](LICENSE)）。
+
 将 iPhone **CarPlay 实时导航引导（转向图标、出口角度与岔路、距离/单位、中文/英文路名、车道引导）** 实时投射到 **MINI / BMW EntryNav2** 主机的原厂光学风挡抬头显示（MOST `FBlock 0x82 / Inst 0x00` `HUDTerminal`）。
 
 > 本仓库仅包含车机端纯 C 核心工程（`carplay-shim.so`、`hud_bridge`、`hud_probe`、`rgd_listen`、渲染器、单元测试与 systemd 部署模板），不含 Android 调试端 APK 与车机专有闭源库。
@@ -184,3 +188,16 @@ systemctl restart CARPLAY.service
 | **Apple 地图** | 正常 | **支持**（接近复杂路口自动弹出 2~8 车道） | 完整下发 `0x5201` + `0x5202` + `0x5204` |
 | **高德地图** | 正常 | **暂不显示** | 高德 iOS CarPlay 版目前仅在中控屏自绘车道线，**不通过 iAP2 下发 `0x5204`** |
 | **百度地图** | 正常 | 协议支持 `0x5204` | 依赖版本下发情况 |
+
+---
+
+## 七、原创版权声明与非商业开源许可
+
+- **版权声明**：`Copyright (c) 2026 cerary. All rights reserved.`
+- **原创性说明**：本仓库中的所有 C 语言源码（`carplay_shim.c`、`hud_bridge.c`、`hud_render.c`、`hud_probe.c`、`rgd_listen.c`、`iap2_rgd.h`、`vmost_api.h`、`hud_render.h`、`test_hud_render.c`）均为作者基于实车抓包与二进制分析**独立原创编写**，不包含任何第三方源码或静态图片素材；编译所需的 `libvmostclient.so.1` 与 `libvmost.so.1` 为车机原厂系统库（请从自己的主机提取，本仓库不提供）。
+- **开源许可协议**：本项目采用 **[PolyForm Noncommercial License 1.0.0](LICENSE)** 授权：
+  - ✅ **允许**：个人学习、技术研究、代码审阅、自车非商业使用与非商业二次开发（分发时须保留原作者版权声明与完整 `LICENSE`）。
+  - ❌ **严禁商用**：禁止任何个人或商业机构将本项目源码或编译产物用于**任何商业用途**，包括但不限于改装店/个人收费刷机或安装服务、打包售卖硬件/软件盒子、集成至商业产品或商业分发。
+  - 如需商业授权，请通过 GitHub Issue 联系作者。
+
+> **喜欢这个项目的话，别忘了点一个 Star ⭐，你的支持是持续维护和适配更多车型的最大动力！**

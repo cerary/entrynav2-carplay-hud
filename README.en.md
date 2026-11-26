@@ -2,6 +2,10 @@
 
 **Language / 语言：** [简体中文](README.md) | [English](README.en.md)
 
+> **If this project helped or inspired you, please consider giving it a Star ⭐!**
+>
+> **Original Work & Noncommercial License**: All pure-C core code in this repository is 100% original work written from scratch via real-vehicle captures and protocol analysis. Permitted for personal learning, research, and noncommercial use only — **commercial use is strictly prohibited** (see [LICENSE](LICENSE)).
+
 Real-time **iPhone CarPlay Route Guidance** (maneuver icons, exit angles & junction branches, distance/units, UTF-16BE street names, and lane guidance) rendered onto the factory windshield Head-Up Display of **MINI / BMW EntryNav2** head units over MOST `FBlock 0x82 / Inst 0x00` (`HUDTerminal`).
 
 > This repository contains only the pure-C head-unit core (`carplay-shim.so`, `hud_bridge`, `hud_probe`, `rgd_listen`, renderer, unit tests, and `systemd` unit templates). It excludes the Android companion APK and proprietary head-unit libraries.
@@ -184,3 +188,16 @@ systemctl restart CARPLAY.service
 | **Apple Maps** | Supported | **Supported** (2–8 lanes near junctions) | Emits `0x5201`, `0x5202`, and `0x5204` |
 | **Amap (高德地图)** | Supported | **Not emitted by app** | iOS CarPlay Amap draws lanes on the main CarPlay screen only and sends 0 `0x5204` frames over iAP2 |
 | **Baidu Maps (百度地图)** | Supported | Supported (protocol-level `0x5204`) | Depends on app version |
+
+---
+
+## 7. Copyright & Noncommercial License
+
+- **Copyright**: `Copyright (c) 2026 cerary. All rights reserved.`
+- **Originality**: All C source files, headers, vector rendering algorithms, and tests in this repository (`carplay_shim.c`, `hud_bridge.c`, `hud_render.c`, `hud_probe.c`, `rgd_listen.c`, `iap2_rgd.h`, `vmost_api.h`, `hud_render.h`, `test_hud_render.c`) are **original work written from scratch** by the author based on live vehicle captures and binary analysis, with zero third-party code or static image assets. The `libvmostclient.so.1` and `libvmost.so.1` shared libraries required for linking belong to your own head unit and are not distributed here.
+- **License**: Licensed under the **[PolyForm Noncommercial License 1.0.0](LICENSE)**:
+  - ✅ **Permitted**: Personal study, research, inspection, noncommercial personal vehicle use, and noncommercial forks/modifications (must retain the original copyright notice and `LICENSE`).
+  - ❌ **Commercial Use Prohibited**: You may **not** use, bundle, redistribute, or sell this software or its compiled binaries for any commercial purpose — including paid coding/retrofit services, commercial hardware/software dongles, or integration into commercial products.
+  - For commercial licensing inquiries, please contact the author via GitHub Issues.
+
+> **If you like this project, please drop a Star ⭐ — it really helps and motivates continued work!**
