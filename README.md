@@ -1,5 +1,7 @@
 # EntryNav2 CarPlay → 原厂光学 MOST HUD 实时导航投射（`hud-port`）
 
+**语言 / Language：** [简体中文](README.md) | [English](README.en.md)
+
 将 iPhone **CarPlay 实时导航引导（转向图标、出口角度与岔路、距离/单位、中文/英文路名、车道引导）** 实时投射到 **MINI / BMW EntryNav2** 主机的原厂光学风挡抬头显示（MOST `FBlock 0x82 / Inst 0x00` `HUDTerminal`）。
 
 > 本仓库仅包含车机端纯 C 核心工程（`carplay-shim.so`、`hud_bridge`、`hud_probe`、`rgd_listen`、渲染器、单元测试与 systemd 部署模板），不含 Android 调试端 APK 与车机专有闭源库。
