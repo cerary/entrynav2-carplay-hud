@@ -1,0 +1,13 @@
+[Unit]
+Description=CarPlay iAP2 -> EntryNav2 MOST HUD Bridge (Persistent)
+After=vmostd.service
+Wants=vmostd.service
+
+[Service]
+Type=simple
+ExecStart=/opt/hud-port/hud_bridge --log /tmp/hud_bridge.log
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=navigation.target
