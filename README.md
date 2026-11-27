@@ -35,7 +35,7 @@
 ### 2. 原生光学 MOST HUD 矢量渲染（`hud_bridge` + `hud_render.c`）
 直连 `/var/run/vmost_sockstream`（`MHP 0xF1/0x05`）与 `FBlock 0x82 / Inst 0x00` (`HUDTerminal`)，完整消费 `0x5201` / `0x5202` / `0x5204` 全字段并实时计算绘制：
 - **自由角度矢量化与岔路上下文**：依据 `ExitAngle (-180°..+180°)` 连续旋转主路径，结合等半径圆弧倒角与 `Open V-Chevron` 开口箭头，并将 `JunctionElementAngles[]` 绘制为暗色（`HUD_COLOR_DIM = 3`）非行进岔路底图。
-- **原生 `0x021E` 硬件圆弧与 `0x021D` 单块无缝多边形**：严格对齐原厂 `0x021E` 坐标系（`0 = 9 点钟顺时针`、`0.1°` 精度），用于环岛外环（`HUD_CIRCLE_FULL`）、高速变道与偏置终点的双切圆 **S 弯**（`HUD_CIRCLE_ARC`）及终点圆标（`HUD_CIRCLE_FILLED`）；掉头与环岛高亮路径合并为 **单块连续闭合多边形**（`0x021D`，实测稳定支持 38~58 顶点），消除拼接接缝。
+- **原生 `0x021E` 硬件圆弧与 `0x021D` 单块无缝多边形**：严格对齐原厂 `0x021E` 坐标系（`0 = 3 点钟逆时针`、`0.1°` 精度），用于转向圆角、环岛外环（`HUD_CIRCLE_FULL`）与路径高亮、掉头、高速变道与偏置终点的双切圆 **S 弯**（`HUD_CIRCLE_ARC`）及终点圆标（`HUD_CIRCLE_FILLED`）；辅助分叉与箭头头部采用 `0x021D` 多边形（实测稳定支持 38~58 顶点），消除拼接接缝。
 - **原厂 `DestinationMan` 到达终点**：还原 `libVMostAdapter.so` 到达图形（`0x021E` 实心圆标 + 指向圆点的向上箭头），覆盖 `ManeuverType = 10/12/24/25/27` 与 `RouteState = 2 (Arrived)` 兜底（自动隐藏车道条并优先显示目的地名称）。
 - **自适应多车道与 UTF-16BE 中文编码**：`1.LaneGuidance`（`184×17`）实时绘制 2~8 车道多方向组合箭头与高亮车道；路名编码遵循 `libvmostcpp.so.1.6.0` `writeMOSTString`（ASCII 用 `0x01`，含中文/非 ASCII 自动转为 `0x00` + **UTF-16 Big-Endian** + `0x0000`）。
 - **会话守护**：`FNV-1a` 差异渲染 + 双缓冲 `SwitchVisibility (0x020E)`、15 秒长直路保活、`2500ms` 重算路防抖、遇原厂 `ErrorAck (0x0F)` 自动退让 5 秒。

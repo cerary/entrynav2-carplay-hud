@@ -415,6 +415,77 @@ int main(void) {
     assert(frame.icon_polys[0].kind == HUD_CMD_CIRCLE && frame.icon_polys[0].circle_type == HUD_CIRCLE_FILLED);
     assert(frame.icon_polys[0].cx == 60);
 
+    /* 10. Verify MOST 0x021E arc angles follow verified hardware coords (0=3 o'clock, CCW) */
+    RgdState st_arc;
+    rgd_state_init(&st_arc);
+    st_arc.route_state = 1;
+    st_arc.ever_active = 1;
+    st_arc.last_active_ms = 5000;
+    st_arc.has_man_current = 1;
+    st_arc.man_current_idx = 0;
+    st_arc.man_count = 1;
+    st_arc.maneuvers[0].valid = 1;
+    st_arc.maneuvers[0].index = 0;
+    st_arc.maneuvers[0].has_exit_angle = 1;
+
+    /* Left -90: cx=42, cy=54, r=18, CCW from 3:00 (0) to 12:00 (900) */
+    st_arc.maneuvers[0].type = 1;
+    st_arc.maneuvers[0].exit_angle = -90;
+    hud_render_build_frame(&st_arc, 5000, 120, 72, 184, 17, &frame);
+    assert(frame.icon_polys[1].kind == HUD_CMD_CIRCLE && frame.icon_polys[1].circle_type == HUD_CIRCLE_ARC);
+    assert(frame.icon_polys[1].cx == 42 && frame.icon_polys[1].cy == 54 && frame.icon_polys[1].radius == 18);
+    assert(frame.icon_polys[1].start_01deg == 0u && frame.icon_polys[1].end_01deg == 900u);
+
+    /* Right +90: cx=78, cy=54, r=18, CCW from 12:00 (900) to 9:00 (1800) */
+    st_arc.maneuvers[0].type = 2;
+    st_arc.maneuvers[0].exit_angle = 90;
+    hud_render_build_frame(&st_arc, 5000, 120, 72, 184, 17, &frame);
+    assert(frame.icon_polys[1].kind == HUD_CMD_CIRCLE && frame.icon_polys[1].circle_type == HUD_CIRCLE_ARC);
+    assert(frame.icon_polys[1].cx == 78 && frame.icon_polys[1].cy == 54 && frame.icon_polys[1].radius == 18);
+    assert(frame.icon_polys[1].start_01deg == 900u && frame.icon_polys[1].end_01deg == 1800u);
+
+    /* Slight Left -45: CCW from 3:00 (0) to 1:30 (450) */
+    st_arc.maneuvers[0].type = 13;
+    st_arc.maneuvers[0].exit_angle = -45;
+    hud_render_build_frame(&st_arc, 5000, 120, 72, 184, 17, &frame);
+    assert(frame.icon_polys[1].kind == HUD_CMD_CIRCLE && frame.icon_polys[1].circle_type == HUD_CIRCLE_ARC);
+    assert(frame.icon_polys[1].start_01deg == 0u && frame.icon_polys[1].end_01deg == 450u);
+
+    /* Slight Right +45: CCW from 10:30 (1350) to 9:00 (1800) */
+    st_arc.maneuvers[0].type = 14;
+    st_arc.maneuvers[0].exit_angle = 45;
+    hud_render_build_frame(&st_arc, 5000, 120, 72, 184, 17, &frame);
+    assert(frame.icon_polys[1].kind == HUD_CMD_CIRCLE && frame.icon_polys[1].circle_type == HUD_CIRCLE_ARC);
+    assert(frame.icon_polys[1].start_01deg == 1350u && frame.icon_polys[1].end_01deg == 1800u);
+
+    /* Roundabout RHT right exit (+90 = 3 o'clock = 0): CCW from entry 6:00 (2700) to exit 3:00 (0) */
+    st_arc.maneuvers[0].type = 28;
+    st_arc.maneuvers[0].junction_type = 1;
+    st_arc.maneuvers[0].driving_side = 0;
+    st_arc.maneuvers[0].exit_angle = 90;
+    hud_render_build_frame(&st_arc, 5000, 120, 72, 184, 17, &frame);
+    int rb_arc_ok = 0;
+    for (uint8_t i = 0; i < frame.icon_poly_count; i++) {
+        if (frame.icon_polys[i].kind == HUD_CMD_CIRCLE && frame.icon_polys[i].circle_type == HUD_CIRCLE_ARC) {
+            assert(frame.icon_polys[i].start_01deg == 2700u && frame.icon_polys[i].end_01deg == 0u);
+            rb_arc_ok = 1;
+        }
+    }
+    assert(rb_arc_ok);
+
+    /* Roundabout LHT left exit (-90 = 9 o'clock = 1800): CW from 2700 -> CCW start=1800, end=2700 */
+    st_arc.maneuvers[0].driving_side = 1;
+    st_arc.maneuvers[0].exit_angle = -90;
+    hud_render_build_frame(&st_arc, 5000, 120, 72, 184, 17, &frame);
+    rb_arc_ok = 0;
+    for (uint8_t i = 0; i < frame.icon_poly_count; i++) {
+        if (frame.icon_polys[i].kind == HUD_CMD_CIRCLE && frame.icon_polys[i].circle_type == HUD_CIRCLE_ARC) {
+            assert(frame.icon_polys[i].start_01deg == 1800u && frame.icon_polys[i].end_01deg == 2700u);
+            rb_arc_ok = 1;
+        }
+    }
+    assert(rb_arc_ok);
+
     printf("ALL test_hud_render ASSERTIONS PASSED!\n");
     return 0;
 }

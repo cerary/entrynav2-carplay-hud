@@ -456,10 +456,10 @@ static void add_poly(HudPolygonCmd *arr, uint8_t *cnt,
     (*cnt)++;
 }
 
-/* Convert screen angle (0=top, +90=right, 180=bottom, -90=left)
- * to MOST 0x021E angle (0.1 deg units, 0=9 o'clock/left, CW: 900=top, 1800=right, 2700=bottom). */
+/* Convert screen angle (0=top/12:00, +90=right/3:00, 180=bottom/6:00, -90=left/9:00)
+ * to MOST 0x021E angle (0.1 deg units, 0=3 o'clock/right, CCW: 900=top, 1800=left, 2700=bottom). */
 static uint32_t screen_deg_to_hud_01deg(float screen_deg) {
-    float d = fmodf(screen_deg + 90.0f, 360.0f);
+    float d = fmodf(90.0f - screen_deg, 360.0f);
     if (d < 0.0f) d += 360.0f;
     int v = (int)lroundf(d * 10.0f) % 3600;
     if (v < 0) v += 3600;
@@ -635,27 +635,27 @@ static void add_s_curve_arcs(HudPolygonCmd *arr, uint8_t *cnt,
     }
 
     if (dir > 0.0f) {
-        /* Bottom arc around (x0+R, y0): -90 deg -> -90 + theta deg (CW) */
+        /* Bottom arc around (x0+R, y0): 9:00 (1800) back to (1800 - theta) -> CCW sweep */
         add_circle(arr, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
                    cx1, y0, r_px,
-                   screen_deg_to_hud_01deg(-90.0f),
-                   screen_deg_to_hud_01deg(-90.0f + theta));
-        /* Top arc around (x1-R, y1): 90 deg -> 90 + theta deg (CW) */
-        add_circle(arr, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
-                   cx2, y1, r_px,
-                   screen_deg_to_hud_01deg(90.0f),
-                   screen_deg_to_hud_01deg(90.0f + theta));
-    } else {
-        /* Bottom arc around (x0-R, y0): 90 - theta deg -> 90 deg (CW) */
-        add_circle(arr, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
-                   cx1, y0, r_px,
-                   screen_deg_to_hud_01deg(90.0f - theta),
-                   screen_deg_to_hud_01deg(90.0f));
-        /* Top arc around (x1+R, y1): -90 - theta deg -> -90 deg (CW) */
-        add_circle(arr, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
-                   cx2, y1, r_px,
-                   screen_deg_to_hud_01deg(-90.0f - theta),
+                   screen_deg_to_hud_01deg(-90.0f + theta),
                    screen_deg_to_hud_01deg(-90.0f));
+        /* Top arc around (x1-R, y1): (3600 - theta) up to 3:00 (0) -> CCW sweep */
+        add_circle(arr, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
+                   cx2, y1, r_px,
+                   screen_deg_to_hud_01deg(90.0f + theta),
+                   screen_deg_to_hud_01deg(90.0f));
+    } else {
+        /* Bottom arc around (x0-R, y0): 3:00 (0) up to (+theta) -> CCW sweep */
+        add_circle(arr, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
+                   cx1, y0, r_px,
+                   screen_deg_to_hud_01deg(90.0f),
+                   screen_deg_to_hud_01deg(90.0f - theta));
+        /* Top arc around (x1+R, y1): 9:00 (1800) down to (1800 + theta) -> CCW sweep */
+        add_circle(arr, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
+                   cx2, y1, r_px,
+                   screen_deg_to_hud_01deg(-90.0f),
+                   screen_deg_to_hud_01deg(-90.0f - theta));
     }
     /* Smooth rounded inflection bridge so integer-radius flat-capped arcs meet without a notch */
     float mx = (x0 + x1) * 0.5f;
@@ -899,10 +899,10 @@ static void render_guiding_icon(const RgdManeuver *man, int is_arrived,
         /* 3. White entry stem from bottom to ring bottom (with round caps at both ends for seamless join) */
         add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, X(cx), Y(62.5f), X(cx), Y(cy + r), path_w, 1, 1);
 
-        /* 4. White roundabout arc via 0x021E (RHT sweeps CCW: start=exit -> end=2700; LHT sweeps CW: start=2700 -> end=exit) */
+        /* 4. White roundabout arc via 0x021E (CCW sweep: RHT starts at entry=2700 -> exit; LHT starts at exit -> entry=2700) */
         if (exit_hud != entry_hud) {
-            uint32_t a_start = ccw ? exit_hud : entry_hud;
-            uint32_t a_end   = ccw ? entry_hud : exit_hud;
+            uint32_t a_start = ccw ? entry_hud : exit_hud;
+            uint32_t a_end   = ccw ? exit_hud : entry_hud;
             add_circle(polys, cnt, w, h, HUD_COLOR_WHITE, path_lw, HUD_CIRCLE_ARC,
                        X(cx), Y(cy), r * s, a_start, a_end);
         }
@@ -990,14 +990,14 @@ static void render_guiding_icon(const RgdManeuver *man, int is_arrived,
             add_round_seg(polys, cnt, w, h, HUD_COLOR_WHITE, sx_px, fc_y_px + 1.0f, sx_px, fc_y_px, (float)lw, 1, 1);
         }
 
-        /* Hardware circular arc fillet via 0x021E */
+        /* Hardware circular arc fillet via 0x021E (CCW sweep) */
         uint32_t a_start, a_end;
         if (turn_deg > 0) {
-            a_start = screen_deg_to_hud_01deg(-90.0f);
-            a_end   = screen_deg_to_hud_01deg(-90.0f + (float)turn_deg);
+            a_start = screen_deg_to_hud_01deg(-90.0f + (float)turn_deg);
+            a_end   = screen_deg_to_hud_01deg(-90.0f);
         } else {
-            a_start = screen_deg_to_hud_01deg(90.0f + (float)turn_deg);
-            a_end   = screen_deg_to_hud_01deg(90.0f);
+            a_start = screen_deg_to_hud_01deg(90.0f);
+            a_end   = screen_deg_to_hud_01deg(90.0f + (float)turn_deg);
         }
         add_circle(polys, cnt, w, h, HUD_COLOR_WHITE, lw, HUD_CIRCLE_ARC,
                    fc_x_px, fc_y_px, r_px, a_start, a_end);
@@ -1078,8 +1078,8 @@ static void draw_lane_branch(HudPolygonCmd *polys, uint8_t *cnt,
         }
         add_circle(polys, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
                    arc_cx, arc_cy, r_px,
-                   screen_deg_to_hud_01deg(-90.0f),
-                   screen_deg_to_hud_01deg(90.0f));
+                   screen_deg_to_hud_01deg(90.0f),
+                   screen_deg_to_hud_01deg(-90.0f));
         add_round_seg(polys, cnt, w, h, color, ex, arc_cy, ex, 11.0f * h_scale, stem_thick, 0, 0);
         add_lane_arrowhead(polys, cnt, w, h, color, ex, 13.0f * h_scale, 180.0f,
                            3.4f * h_scale, 2.7f * h_scale, 0.9f * h_scale);
@@ -1108,11 +1108,11 @@ static void draw_lane_branch(HudPolygonCmd *polys, uint8_t *cnt,
 
     uint32_t a_start, a_end;
     if (angle > 0) {
-        a_start = screen_deg_to_hud_01deg(-90.0f);
-        a_end   = screen_deg_to_hud_01deg(-90.0f + (float)angle);
+        a_start = screen_deg_to_hud_01deg(-90.0f + (float)angle);
+        a_end   = screen_deg_to_hud_01deg(-90.0f);
     } else {
-        a_start = screen_deg_to_hud_01deg(90.0f + (float)angle);
-        a_end   = screen_deg_to_hud_01deg(90.0f);
+        a_start = screen_deg_to_hud_01deg(90.0f);
+        a_end   = screen_deg_to_hud_01deg(90.0f + (float)angle);
     }
     add_circle(polys, cnt, w, h, color, lw, HUD_CIRCLE_ARC,
                fc_x, fc_y, r_int, a_start, a_end);
